@@ -1,861 +1,784 @@
--- ================================================
---   Ro-Citizens Auto Farm v2
---   Clean UI | Toggles | Job Join | Smart Farm
--- ================================================
+-- ╔══════════════════════════════════════════════════════════════════╗
+-- ║         Ro-Citizens Hub  •  Auto Farm v3  •  Mod Menu UI        ║
+-- ╚══════════════════════════════════════════════════════════════════╝
+local Players          = game:GetService("Players")
+local TweenService     = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
+local TeleportService  = game:GetService("TeleportService")
+local Workspace        = game:GetService("Workspace")
+local ReplicatedStorage= game:GetService("ReplicatedStorage")
+local RunService       = game:GetService("RunService")
 
-local Players       = game:GetService("Players")
-local RunService    = game:GetService("RunService")
-local TweenService  = game:GetService("TweenService")
-local UIS           = game:GetService("UserInputService")
-local LP            = Players.LocalPlayer
+local Player    = Players.LocalPlayer
+local Character = Player.Character or Player.CharacterAdded:Wait()
+local HRP       = Character:WaitForChild("HumanoidRootPart")
+local Humanoid  = Character:WaitForChild("Humanoid")
 
--- ================================================
---   UTILITIES
--- ================================================
+local MODERN_PLACE_ID = 6900919223
 
-local function getChar() return LP.Character end
-local function getHRP()  local c=getChar(); return c and c:FindFirstChild("HumanoidRootPart") end
-local function getHum()  local c=getChar(); return c and c:FindFirstChildOfClass("Humanoid") end
-
--- Safe teleport — waits for character, no spam
-local function safeTp(cf, waitAfter)
-    local hrp = getHRP()
-    if not hrp then return end
-    hrp.CFrame = cf
-    task.wait(waitAfter or 0.6)
-end
-
--- Walk humanoid to position and yield until arrived or timeout
-local function walkTo(pos, timeout)
-    local hum = getHum()
-    local hrp = getHRP()
-    if not hum or not hrp then return end
-    hum:MoveTo(pos)
-    local t = 0
-    repeat
-        task.wait(0.1)
-        t = t + 0.1
-        if t > (timeout or 8) then break end
-    until (hrp.Position - pos).Magnitude < 5 or not hum
-end
-
--- Fire all ProximityPrompts and ClickDetectors on/in a part
-local function interact(part)
-    if not part then return end
-    for _, v in ipairs(part:GetDescendants()) do
-        if v:IsA("ProximityPrompt") then
-            fireproximityprompt(v)
-            task.wait(0.2)
-        elseif v:IsA("ClickDetector") then
-            fireclickdetector(v)
-            task.wait(0.2)
-        end
+-- ── Map detection ────────────────────────────────────────────────
+local function IsModernMap()
+    if game.PlaceId == MODERN_PLACE_ID then return true end
+    for _,tag in ipairs({"ThePalms","ModernMap","PalmStreet"}) do
+        if Workspace:FindFirstChild(tag) then return true end
     end
-    -- also check parent chain up 2 levels
-    local p = part.Parent
-    for i = 1, 2 do
-        if p then
-            for _, v in ipairs(p:GetChildren()) do
-                if v:IsA("ProximityPrompt") then fireproximityprompt(v); task.wait(0.1) end
-                if v:IsA("ClickDetector")   then fireclickdetector(v);   task.wait(0.1) end
-            end
-            p = p.Parent
-        end
+    for _,tag in ipairs({"OldMap","ClassicMap"}) do
+        if Workspace:FindFirstChild(tag) then return false end
     end
+    return false
 end
 
--- Find part by name list, returns {part, position}
-local function findPart(names, maxDist)
-    maxDist = maxDist or 999
-    local hrp = getHRP()
-    if not hrp then return nil end
-    local best, bestDist = nil, maxDist
-    for _, obj in ipairs(workspace:GetDescendants()) do
-        if obj:IsA("BasePart") or obj:IsA("Model") then
-            local n = obj.Name:lower()
-            for _, name in ipairs(names) do
-                if n:find(name:lower()) then
-                    local pos = obj:IsA("Model") and obj.PrimaryPart and obj.PrimaryPart.Position
-                              or (obj:IsA("BasePart") and obj.Position)
-                    if pos then
-                        local d = (hrp.Position - pos).Magnitude
-                        if d < bestDist then best, bestDist = obj, d end
-                    end
-                    break
-                end
+-- ── Portals & task positions ─────────────────────────────────────
+local JobPortals = {
+    Nurse     = CFrame.new(108, 5,-312),
+    Delivery  = CFrame.new(-185,5, 94),
+    Police    = CFrame.new(45,  5, 198),
+    FryCook   = CFrame.new(-22, 5, 310),
+    Cashier   = CFrame.new(-38, 5, 310),
+    Criminal  = CFrame.new(220, 5, -88),
+    BusDriver = CFrame.new(-55, 5, -10),
+}
+local JobTP = {
+    Nurse    = {patient=CFrame.new(108,5,-290), medicine=CFrame.new(95,5,-305), laundry=CFrame.new(125,5,-318), food=CFrame.new(100,5,-320)},
+    Delivery = {pickup=CFrame.new(-185,5,110), dropoff1=CFrame.new(-120,5,60), dropoff2=CFrame.new(50,5,-100), dropoff3=CFrame.new(200,5,150)},
+    Police   = {spawn=CFrame.new(45,5,210), patrol1=CFrame.new(80,5,180), patrol2=CFrame.new(100,5,50), arrest=CFrame.new(220,5,-88)},
+    FryCook  = {grill=CFrame.new(-18,5,318), fryer=CFrame.new(-14,5,318), counter=CFrame.new(-22,5,306), output=CFrame.new(-26,5,306)},
+    Criminal = {store1=CFrame.new(-38,5,310), store2=CFrame.new(108,5,250), bank=CFrame.new(60,5,-10), escape=CFrame.new(220,5,-60)},
+}
+
+local State = {NurseFarm=false,DeliveryFarm=false,PoliceFarm=false,FryCookFarm=false,CriminalFarm=false,Dragging=false,Mini=false}
+local Loops = {}
+
+-- ── Core helpers ─────────────────────────────────────────────────
+local function SafeTP(cf)
+    if not HRP then return end
+    if typeof(cf)=="Vector3" then cf=CFrame.new(cf+Vector3.new(0,3,0))
+    elseif typeof(cf)=="CFrame" then cf=cf+Vector3.new(0,3,0) end
+    HRP.CFrame=cf; task.wait(0.4)
+end
+local function FindPart(names)
+    local best,bestD=nil,math.huge
+    for _,n in ipairs(names) do
+        for _,v in ipairs(Workspace:GetDescendants()) do
+            if (v:IsA("BasePart") or v:IsA("MeshPart")) and string.find(v.Name:lower(),n:lower()) then
+                local d=(v.Position-HRP.Position).Magnitude
+                if d<bestD then best=v bestD=d end
             end
         end
     end
     return best
 end
-
-local function getPos(obj)
-    if not obj then return nil end
-    if obj:IsA("Model") then
-        return obj.PrimaryPart and obj.PrimaryPart.Position or obj:GetModelCFrame().Position
+local function Fire(name,...)
+    for _,v in ipairs(ReplicatedStorage:GetDescendants()) do
+        if (v:IsA("RemoteEvent") or v:IsA("RemoteFunction")) and v.Name:lower()==name:lower() then
+            if v:IsA("RemoteEvent") then v:FireServer(...)
+            else pcall(function() v:InvokeServer(...) end) end
+            return
+        end
     end
-    return obj.Position
+end
+local function ClickPrompt()
+    for _,v in ipairs(Workspace:GetDescendants()) do
+        if v:IsA("ProximityPrompt") then
+            local d=v.Parent:FindFirstChildWhichIsA("BasePart") or v.Parent
+            if d and (d.Position-HRP.Position).Magnitude<12 then
+                fireproximityprompt(v); task.wait(0.3)
+            end
+        end
+    end
+end
+local function EnterPortal(pCF)
+    SafeTP(pCF); task.wait(0.5)
+    HRP.CFrame=pCF*CFrame.new(0,0,-2); task.wait(0.6)
+    for _,r in ipairs({"StartJob","JoinJob","SelectJob","AcceptJob","EnterCareer"}) do Fire(r) end
+    local vi=game:GetService("VirtualInputManager")
+    if vi then
+        pcall(function() vi:SendKeyEvent(true,Enum.KeyCode.F,false,game) end); task.wait(0.1)
+        pcall(function() vi:SendKeyEvent(false,Enum.KeyCode.F,false,game) end)
+    end
+    task.wait(0.8)
 end
 
--- ================================================
---   JOB CIRCLE POSITIONS (Ro-Citizens map)
---   These are approximate — adjust to your server
--- ================================================
+-- ── Farm loops ───────────────────────────────────────────────────
+local function NurseLoop()
+    EnterPortal(JobPortals.Nurse); task.wait(1)
+    while State.NurseFarm do
+        local p=JobTP.Nurse
+        SafeTP(p.patient);  task.wait(0.3); ClickPrompt(); Fire("InteractPatient"); task.wait(0.5)
+        SafeTP(p.medicine); task.wait(0.3); ClickPrompt(); Fire("PickupMedicine");  task.wait(0.4)
+        SafeTP(p.laundry);  task.wait(0.3); ClickPrompt(); Fire("PickupLaundry");   task.wait(0.4)
+        SafeTP(p.food);     task.wait(0.3); ClickPrompt(); Fire("PickupFood");       task.wait(0.4)
+        SafeTP(p.patient);  task.wait(0.3); ClickPrompt(); Fire("DeliverItems"); Fire("CompletePatient"); task.wait(0.8)
+    end
+end
+local function DeliveryLoop()
+    EnterPortal(JobPortals.Delivery); task.wait(1)
+    local drops={JobTP.Delivery.dropoff1,JobTP.Delivery.dropoff2,JobTP.Delivery.dropoff3}
+    local idx=1
+    while State.DeliveryFarm do
+        SafeTP(JobTP.Delivery.pickup); task.wait(0.3); ClickPrompt(); Fire("PickupPackage"); Fire("GrabDelivery"); task.wait(0.5)
+        SafeTP(drops[idx]); task.wait(0.3); ClickPrompt(); Fire("DeliverPackage",{stars=5}); Fire("CompleteDelivery",5); Fire("FinishDelivery",5); task.wait(0.5)
+        idx=(idx % #drops)+1; task.wait(0.6)
+    end
+end
+local function PoliceLoop()
+    EnterPortal(JobPortals.Police); task.wait(1)
+    local p=JobTP.Police
+    while State.PoliceFarm do
+        SafeTP(p.patrol1); task.wait(0.4); ClickPrompt(); Fire("PatrolArea"); task.wait(0.3)
+        SafeTP(p.patrol2); task.wait(0.4)
+        SafeTP(p.arrest);  task.wait(0.4); ClickPrompt(); Fire("ArrestCriminal"); Fire("HandcuffPlayer"); Fire("TazeCriminal"); task.wait(0.5)
+        Fire("PoliceReward"); task.wait(0.8)
+    end
+end
+local function FryCookLoop()
+    EnterPortal(JobPortals.FryCook); task.wait(1)
+    local p=JobTP.FryCook
+    while State.FryCookFarm do
+        SafeTP(p.grill);   task.wait(0.3); ClickPrompt(); Fire("PlacePatty");    Fire("StartGrill");   task.wait(2)
+        SafeTP(p.fryer);   task.wait(0.3); ClickPrompt(); Fire("PlaceFries");    Fire("StartFryer");   task.wait(2)
+        SafeTP(p.counter); task.wait(0.3); ClickPrompt(); Fire("AssembleBurger");Fire("BuildOrder");   task.wait(0.4)
+        SafeTP(p.output);  task.wait(0.3); ClickPrompt(); Fire("PlaceOrder");    Fire("CompleteOrder");task.wait(0.6)
+    end
+end
+local function CriminalLoop()
+    EnterPortal(JobPortals.Criminal); task.wait(1)
+    local p=JobTP.Criminal
+    while State.CriminalFarm do
+        SafeTP(p.store1); task.wait(0.4); ClickPrompt(); Fire("RobStore"); Fire("ThreatenCashier"); task.wait(1.5)
+        SafeTP(p.escape); task.wait(0.4); Fire("Escape"); task.wait(1)
+        SafeTP(p.bank);   task.wait(0.4); ClickPrompt(); Fire("RobBank"); Fire("OpenVault"); task.wait(2)
+        SafeTP(p.escape); Fire("EscapePolice"); task.wait(1.5)
+    end
+end
 
-local JOB_CIRCLES = {
-    PizzaDelivery = CFrame.new(92, 3, -215),
-    Police        = CFrame.new(-180, 3, 80),
-    Miner         = CFrame.new(280, 3, 340),
-    Fisher        = CFrame.new(-320, 3, -100),
-    Doctor        = CFrame.new(30, 3, 120),
-    Firefighter   = CFrame.new(-80, 3, -310),
-    Mechanic      = CFrame.new(200, 3, -50),
-    Cashier       = CFrame.new(60, 3, -80),
-    Banker        = CFrame.new(-10, 3, 200),
-    Criminal      = CFrame.new(350, 3, -350),
+-- ── Toggle farm ──────────────────────────────────────────────────
+local function ToggleFarm(key,loopFn,pill,pillLabel,cardStroke,statusDot)
+    State[key]=not State[key]
+    if State[key] then
+        TweenService:Create(pill,TweenInfo.new(0.18,Enum.EasingStyle.Quad),{BackgroundColor3=Color3.fromRGB(34,197,94)}):Play()
+        pillLabel.Text="ON"; pillLabel.TextColor3=Color3.fromRGB(220,255,220)
+        cardStroke.Color=Color3.fromRGB(34,197,94); cardStroke.Thickness=1.5
+        statusDot.TextColor3=Color3.fromRGB(34,197,94)
+        Loops[key]=coroutine.create(function()
+            local ok,err=pcall(loopFn)
+            if not ok then warn("[Hub] "..tostring(err)) end
+        end)
+        coroutine.resume(Loops[key])
+    else
+        TweenService:Create(pill,TweenInfo.new(0.18,Enum.EasingStyle.Quad),{BackgroundColor3=Color3.fromRGB(35,35,55)}):Play()
+        pillLabel.Text="OFF"; pillLabel.TextColor3=Color3.fromRGB(130,130,160)
+        cardStroke.Color=Color3.fromRGB(50,50,75); cardStroke.Thickness=1
+        statusDot.TextColor3=Color3.fromRGB(80,80,110)
+        Loops[key]=nil
+    end
+end
+
+-- ════════════════════════════════════════════════════════════════
+--  GUI
+-- ════════════════════════════════════════════════════════════════
+if Player.PlayerGui:FindFirstChild("RoCitizensHub") then
+    Player.PlayerGui:FindFirstChild("RoCitizensHub"):Destroy()
+end
+
+local SG=Instance.new("ScreenGui",Player.PlayerGui)
+SG.Name="RoCitizensHub"
+SG.ResetOnSpawn=false
+SG.ZIndexBehavior=Enum.ZIndexBehavior.Sibling
+SG.DisplayOrder=99
+
+-- ── Colour palette ───────────────────────────────────────────────
+local C = {
+    bg      = Color3.fromRGB(10,10,18),
+    surface = Color3.fromRGB(16,16,28),
+    card    = Color3.fromRGB(20,20,34),
+    accent  = Color3.fromRGB(99,102,241),
+    accentB = Color3.fromRGB(139,92,246),
+    green   = Color3.fromRGB(34,197,94),
+    red     = Color3.fromRGB(239,68,68),
+    text    = Color3.fromRGB(230,232,255),
+    muted   = Color3.fromRGB(90,90,125),
+    dim     = Color3.fromRGB(50,50,75),
 }
 
--- Join job: TP to circle, stand in it, interact with prompt
-local function joinJob(jobKey, displayName, statusFn)
-    local cf = JOB_CIRCLES[jobKey]
-    if not cf then return end
-    statusFn("Joining " .. displayName .. " job...")
-    safeTp(cf, 0.5)
-    -- Find job join prompt near us
-    local hrp = getHRP()
-    if not hrp then return end
-    for _, obj in ipairs(workspace:GetDescendants()) do
-        if obj:IsA("ProximityPrompt") or obj:IsA("ClickDetector") then
-            local pos = obj.Parent and obj.Parent:IsA("BasePart") and obj.Parent.Position
-                      or (obj:IsA("BasePart") and obj.Position)
-            if pos and (hrp.Position - pos).Magnitude < 15 then
-                if obj:IsA("ProximityPrompt") then fireproximityprompt(obj) end
-                if obj:IsA("ClickDetector")   then fireclickdetector(obj)   end
-                task.wait(0.3)
-            end
-        end
-    end
-    task.wait(1.5)
-    statusFn(displayName .. " — Farming...")
+-- helper: tween
+local function TW(obj,t,props) TweenService:Create(obj,TweenInfo.new(t,Enum.EasingStyle.Quart,Enum.EasingDirection.Out),props):Play() end
+
+-- ── Corner/Stroke helpers ────────────────────────────────────────
+local function Corner(p,r) local c=Instance.new("UICorner",p); c.CornerRadius=UDim.new(0,r or 10); return c end
+local function Stroke(p,col,th,tr)
+    local s=Instance.new("UIStroke",p); s.Color=col; s.Thickness=th or 1
+    if tr then s.Transparency=tr end; return s
+end
+local function Pad(p,l,r2,t,b)
+    local pp=Instance.new("UIPadding",p)
+    pp.PaddingLeft=UDim.new(0,l or 0); pp.PaddingRight=UDim.new(0,r2 or 0)
+    pp.PaddingTop=UDim.new(0,t or 0);  pp.PaddingBottom=UDim.new(0,b or 0)
+    return pp
 end
 
--- ================================================
---   GUI SETUP
--- ================================================
+-- ════════════════════════════════════════════════════════════════
+--  INTRO SCREEN
+-- ════════════════════════════════════════════════════════════════
+local Intro=Instance.new("Frame",SG)
+Intro.Size=UDim2.fromScale(1,1)
+Intro.BackgroundColor3=Color3.fromRGB(0,0,0)
+Intro.BorderSizePixel=0
+Intro.ZIndex=100
 
--- Remove old GUI
-pcall(function()
-    game:GetService("CoreGui"):FindFirstChild("RCFarmV2"):Destroy()
+-- Radial gradient background
+local BG2=Instance.new("Frame",Intro)
+BG2.Size=UDim2.fromScale(1,1)
+BG2.BackgroundColor3=C.bg
+BG2.BorderSizePixel=0
+BG2.ZIndex=101
+Instance.new("UIGradient",BG2).Color=ColorSequence.new{
+    ColorSequenceKeypoint.new(0, Color3.fromRGB(18,10,40)),
+    ColorSequenceKeypoint.new(0.5, Color3.fromRGB(10,10,22)),
+    ColorSequenceKeypoint.new(1, Color3.fromRGB(8,8,16)),
+}
+
+-- Glow orb
+local Orb=Instance.new("Frame",Intro)
+Orb.Size=UDim2.new(0,400,0,400)
+Orb.Position=UDim2.new(0.5,-200,0.5,-200)
+Orb.BackgroundColor3=C.accent
+Orb.BackgroundTransparency=0.85
+Orb.BorderSizePixel=0
+Orb.ZIndex=102
+Corner(Orb,200)
+
+-- Logo container
+local LogoBox=Instance.new("Frame",Intro)
+LogoBox.Size=UDim2.new(0,90,0,90)
+LogoBox.Position=UDim2.new(0.5,-45,0.5,-110)
+LogoBox.BackgroundColor3=C.accent
+LogoBox.BackgroundTransparency=0.6
+LogoBox.BorderSizePixel=0
+LogoBox.ZIndex=104
+Corner(LogoBox,18)
+Stroke(LogoBox,C.accent,2,0.3)
+LogoBox.BackgroundTransparency=1 -- start invisible
+
+local LogoIcon=Instance.new("TextLabel",LogoBox)
+LogoIcon.Size=UDim2.fromScale(1,1)
+LogoIcon.BackgroundTransparency=1
+LogoIcon.Text="⚡"
+LogoIcon.TextSize=48
+LogoIcon.Font=Enum.Font.GothamBold
+LogoIcon.TextColor3=Color3.fromRGB(255,255,255)
+LogoIcon.TextTransparency=1
+LogoIcon.ZIndex=105
+
+local IntroTitle=Instance.new("TextLabel",Intro)
+IntroTitle.Size=UDim2.new(0,340,0,36)
+IntroTitle.Position=UDim2.new(0.5,-170,0.5,0)
+IntroTitle.BackgroundTransparency=1
+IntroTitle.Text="Ro-Citizens Hub"
+IntroTitle.TextColor3=C.text
+IntroTitle.Font=Enum.Font.GothamBold
+IntroTitle.TextSize=28
+IntroTitle.TextTransparency=1
+IntroTitle.ZIndex=105
+
+local IntroSub=Instance.new("TextLabel",Intro)
+IntroSub.Size=UDim2.new(0,340,0,22)
+IntroSub.Position=UDim2.new(0.5,-170,0.5,38)
+IntroSub.BackgroundTransparency=1
+IntroSub.Text="Auto Farm  •  v3  •  Modern Map"
+IntroSub.TextColor3=C.muted
+IntroSub.Font=Enum.Font.Gotham
+IntroSub.TextSize=13
+IntroSub.TextTransparency=1
+IntroSub.ZIndex=105
+
+-- Loading bar
+local LoadBG=Instance.new("Frame",Intro)
+LoadBG.Size=UDim2.new(0,260,0,4)
+LoadBG.Position=UDim2.new(0.5,-130,0.5,75)
+LoadBG.BackgroundColor3=C.dim
+LoadBG.BorderSizePixel=0
+LoadBG.BackgroundTransparency=1
+LoadBG.ZIndex=105
+Corner(LoadBG,2)
+
+local LoadFill=Instance.new("Frame",LoadBG)
+LoadFill.Size=UDim2.new(0,0,1,0)
+LoadFill.BackgroundColor3=C.accent
+LoadFill.BorderSizePixel=0
+LoadFill.ZIndex=106
+Corner(LoadFill,2)
+
+local LoadGrad=Instance.new("UIGradient",LoadFill)
+LoadGrad.Color=ColorSequence.new{
+    ColorSequenceKeypoint.new(0,C.accent),
+    ColorSequenceKeypoint.new(1,C.accentB),
+}
+
+local LoadTxt=Instance.new("TextLabel",Intro)
+LoadTxt.Size=UDim2.new(0,260,0,18)
+LoadTxt.Position=UDim2.new(0.5,-130,0.5,85)
+LoadTxt.BackgroundTransparency=1
+LoadTxt.Text="Initialising..."
+LoadTxt.TextColor3=C.muted
+LoadTxt.Font=Enum.Font.Gotham
+LoadTxt.TextSize=11
+LoadTxt.TextTransparency=1
+LoadTxt.ZIndex=105
+
+-- ── Intro animation sequence ─────────────────────────────────────
+task.spawn(function()
+    task.wait(0.2)
+
+    -- Fade in orb
+    TW(Orb,0.6,{BackgroundTransparency=0.88})
+
+    -- Logo box appears + bounce
+    LogoBox.BackgroundTransparency=0.5
+    TW(LogoBox,0.4,{BackgroundTransparency=0.3})
+    TW(LogoIcon,0.35,{TextTransparency=0})
+    LogoBox.Position=UDim2.new(0.5,-45,0.5,-120)
+    TW(LogoBox,0.45,{Position=UDim2.new(0.5,-45,0.5,-110)})
+    task.wait(0.5)
+
+    -- Title fades in, slides up
+    IntroTitle.Position=UDim2.new(0.5,-170,0.5,10)
+    TW(IntroTitle,0.4,{TextTransparency=0, Position=UDim2.new(0.5,-170,0.5,0)})
+    task.wait(0.2)
+    IntroSub.Position=UDim2.new(0.5,-170,0.5,48)
+    TW(IntroSub,0.35,{TextTransparency=0, Position=UDim2.new(0.5,-170,0.5,38)})
+    task.wait(0.2)
+
+    -- Loading bar
+    TW(LoadBG,0.2,{BackgroundTransparency=0})
+    TW(LoadTxt,0.2,{TextTransparency=0})
+
+    local steps={"Connecting...","Loading farms...","Checking map...","Ready!"}
+    for i,s in ipairs(steps) do
+        LoadTxt.Text=s
+        TW(LoadFill,0.35,{Size=UDim2.new(i/#steps,0,1,0)})
+        task.wait(0.38)
+    end
+    task.wait(0.25)
+
+    -- Slide-out everything upward, fade bg
+    TW(IntroTitle,0.35,{TextTransparency=1, Position=UDim2.new(0.5,-170,0.5,-20)})
+    TW(IntroSub,0.3,{TextTransparency=1,   Position=UDim2.new(0.5,-170,0.5,20)})
+    TW(LogoBox,0.3,{BackgroundTransparency=1, Position=UDim2.new(0.5,-45,0.5,-130)})
+    TW(LogoIcon,0.3,{TextTransparency=1})
+    TW(LoadBG,0.25,{BackgroundTransparency=1})
+    TW(LoadTxt,0.25,{TextTransparency=1})
+    TW(Orb,0.35,{BackgroundTransparency=1})
+    task.wait(0.3)
+    TW(Intro,0.45,{BackgroundTransparency=1})
+    task.wait(0.5)
+    Intro:Destroy()
 end)
 
-local CoreGui = game:GetService("CoreGui")
-local Gui = Instance.new("ScreenGui")
-Gui.Name = "RCFarmV2"
-Gui.ResetOnSpawn = false
-Gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-Gui.Parent = CoreGui
+-- ════════════════════════════════════════════════════════════════
+--  MAIN FRAME
+-- ════════════════════════════════════════════════════════════════
+local FULL_H = 440
+local MINI_H = 50
 
--- Shadow
-local Shadow = Instance.new("Frame")
-Shadow.Size = UDim2.new(0, 310, 0, 500)
-Shadow.Position = UDim2.new(0, 18, 0.5, -247)
-Shadow.BackgroundColor3 = Color3.fromRGB(0,0,0)
-Shadow.BackgroundTransparency = 0.6
-Shadow.BorderSizePixel = 0
-Shadow.ZIndex = 0
-Shadow.Parent = Gui
-Instance.new("UICorner", Shadow).CornerRadius = UDim.new(0,14)
+local MF=Instance.new("Frame",SG)
+MF.Size=UDim2.new(0,320,0,FULL_H)
+MF.Position=UDim2.new(0.5,-160,0.5,-220)
+MF.BackgroundColor3=C.bg
+MF.BorderSizePixel=0
+MF.Active=true
+MF.Visible=false
+MF.BackgroundTransparency=1   -- will fade in
+Corner(MF,14)
+local mainStroke=Stroke(MF,C.accent,1.5,0.4)
 
--- Main
-local Main = Instance.new("Frame")
-Main.Name = "Main"
-Main.Size = UDim2.new(0, 300, 0, 490)
-Main.Position = UDim2.new(0, 14, 0.5, -245)
-Main.BackgroundColor3 = Color3.fromRGB(12, 12, 18)
-Main.BorderSizePixel = 0
-Main.Active = true
-Main.Draggable = true
-Main.ZIndex = 1
-Main.Parent = Gui
-Instance.new("UICorner", Main).CornerRadius = UDim.new(0,12)
+-- ── Title bar ────────────────────────────────────────────────────
+local TitleBar=Instance.new("Frame",MF)
+TitleBar.Size=UDim2.new(1,0,0,50)
+TitleBar.BackgroundColor3=C.surface
+TitleBar.BorderSizePixel=0
+TitleBar.ZIndex=3
+Corner(TitleBar,14)
+-- fill lower half of corner to make it flush with body
+local TBFill=Instance.new("Frame",TitleBar)
+TBFill.Size=UDim2.new(1,0,0.5,0)
+TBFill.Position=UDim2.new(0,0,0.5,0)
+TBFill.BackgroundColor3=C.surface
+TBFill.BorderSizePixel=0
+TBFill.ZIndex=3
 
--- Accent line top
-local Accent = Instance.new("Frame")
-Accent.Size = UDim2.new(1, 0, 0, 2)
-Accent.BackgroundColor3 = Color3.fromRGB(90, 130, 255)
-Accent.BorderSizePixel = 0
-Accent.ZIndex = 2
-Accent.Parent = Main
+local TitleGrad=Instance.new("UIGradient",TitleBar)
+TitleGrad.Color=ColorSequence.new{
+    ColorSequenceKeypoint.new(0,Color3.fromRGB(22,18,45)),
+    ColorSequenceKeypoint.new(1,C.surface),
+}
+TitleGrad.Rotation=90
 
--- Header
-local Header = Instance.new("Frame")
-Header.Size = UDim2.new(1, 0, 0, 48)
-Header.Position = UDim2.new(0, 0, 0, 2)
-Header.BackgroundTransparency = 1
-Header.ZIndex = 2
-Header.Parent = Main
+-- accent left bar
+local AccBar=Instance.new("Frame",TitleBar)
+AccBar.Size=UDim2.new(0,3,0,28)
+AccBar.Position=UDim2.new(0,10,0.5,-14)
+AccBar.BackgroundColor3=C.accent
+AccBar.BorderSizePixel=0
+AccBar.ZIndex=4
+Corner(AccBar,2)
 
-local Icon = Instance.new("TextLabel")
-Icon.Size = UDim2.new(0, 30, 1, 0)
-Icon.Position = UDim2.new(0, 12, 0, 0)
-Icon.BackgroundTransparency = 1
-Icon.Text = "💼"
-Icon.TextSize = 18
-Icon.Font = Enum.Font.GothamBold
-Icon.ZIndex = 2
-Icon.Parent = Header
+local TitleLabel=Instance.new("TextLabel",TitleBar)
+TitleLabel.Size=UDim2.new(0,170,0,22)
+TitleLabel.Position=UDim2.new(0,20,0,8)
+TitleLabel.BackgroundTransparency=1
+TitleLabel.Text="Ro-Citizens Hub"
+TitleLabel.TextColor3=C.text
+TitleLabel.Font=Enum.Font.GothamBold
+TitleLabel.TextSize=15
+TitleLabel.TextXAlignment=Enum.TextXAlignment.Left
+TitleLabel.ZIndex=4
 
-local Title = Instance.new("TextLabel")
-Title.Size = UDim2.new(1, -80, 0, 24)
-Title.Position = UDim2.new(0, 44, 0, 7)
-Title.BackgroundTransparency = 1
-Title.Text = "Ro-Citizens Farm"
-Title.TextColor3 = Color3.fromRGB(240, 240, 255)
-Title.TextSize = 15
-Title.Font = Enum.Font.GothamBold
-Title.TextXAlignment = Enum.TextXAlignment.Left
-Title.ZIndex = 2
-Title.Parent = Header
+local SubLabel=Instance.new("TextLabel",TitleBar)
+SubLabel.Size=UDim2.new(0,170,0,14)
+SubLabel.Position=UDim2.new(0,20,0,30)
+SubLabel.BackgroundTransparency=1
+SubLabel.Text="Auto Farm  •  v3"
+SubLabel.TextColor3=C.accent
+SubLabel.Font=Enum.Font.Gotham
+SubLabel.TextSize=10
+SubLabel.TextXAlignment=Enum.TextXAlignment.Left
+SubLabel.ZIndex=4
 
-local SubTitle = Instance.new("TextLabel")
-SubTitle.Size = UDim2.new(1, -80, 0, 14)
-SubTitle.Position = UDim2.new(0, 44, 0, 30)
-SubTitle.BackgroundTransparency = 1
-SubTitle.Text = "Auto Farm v2"
-SubTitle.TextColor3 = Color3.fromRGB(90, 130, 255)
-SubTitle.TextSize = 10
-SubTitle.Font = Enum.Font.Gotham
-SubTitle.TextXAlignment = Enum.TextXAlignment.Left
-SubTitle.ZIndex = 2
-SubTitle.Parent = Header
+-- Map badge
+local MapBadge=Instance.new("TextLabel",TitleBar)
+MapBadge.Size=UDim2.new(0,68,0,20)
+MapBadge.Position=UDim2.new(1,-116,0.5,-10)
+MapBadge.BackgroundColor3=Color3.fromRGB(22,60,30)
+MapBadge.Text="● MODERN"
+MapBadge.TextColor3=C.green
+MapBadge.Font=Enum.Font.GothamBold
+MapBadge.TextSize=9
+MapBadge.BorderSizePixel=0
+MapBadge.ZIndex=4
+Corner(MapBadge,4)
 
--- Close
-local CloseBtn = Instance.new("TextButton")
-CloseBtn.Size = UDim2.new(0, 26, 0, 26)
-CloseBtn.Position = UDim2.new(1, -34, 0, 11)
-CloseBtn.BackgroundColor3 = Color3.fromRGB(40, 40, 60)
-CloseBtn.Text = "✕"
-CloseBtn.TextColor3 = Color3.fromRGB(180, 180, 200)
-CloseBtn.TextSize = 12
-CloseBtn.Font = Enum.Font.GothamBold
-CloseBtn.BorderSizePixel = 0
-CloseBtn.ZIndex = 2
-CloseBtn.Parent = Header
-Instance.new("UICorner", CloseBtn).CornerRadius = UDim.new(0, 6)
-CloseBtn.MouseButton1Click:Connect(function() Gui:Destroy() end)
+-- Mini button
+local MiniBtn=Instance.new("TextButton",TitleBar)
+MiniBtn.Size=UDim2.new(0,28,0,28)
+MiniBtn.Position=UDim2.new(1,-40,0.5,-14)
+MiniBtn.BackgroundColor3=Color3.fromRGB(30,30,50)
+MiniBtn.Text="—"
+MiniBtn.TextColor3=C.muted
+MiniBtn.Font=Enum.Font.GothamBold
+MiniBtn.TextSize=13
+MiniBtn.BorderSizePixel=0
+MiniBtn.AutoButtonColor=false
+MiniBtn.ZIndex=5
+Corner(MiniBtn,6)
+Stroke(MiniBtn,C.dim,1)
 
--- Divider
-local Div = Instance.new("Frame")
-Div.Size = UDim2.new(1, -24, 0, 1)
-Div.Position = UDim2.new(0, 12, 0, 50)
-Div.BackgroundColor3 = Color3.fromRGB(30, 30, 50)
-Div.BorderSizePixel = 0
-Div.ZIndex = 2
-Div.Parent = Main
+-- ── Body ─────────────────────────────────────────────────────────
+local Body=Instance.new("Frame",MF)
+Body.Size=UDim2.new(1,0,1,-50)
+Body.Position=UDim2.new(0,0,0,50)
+Body.BackgroundTransparency=1
+Body.ZIndex=2
+Body.ClipsDescendants=true
+
+-- Scrolling list
+local SF=Instance.new("ScrollingFrame",Body)
+SF.Size=UDim2.new(1,0,1,-36)
+SF.Position=UDim2.new(0,0,0,0)
+SF.BackgroundTransparency=1
+SF.BorderSizePixel=0
+SF.ScrollBarThickness=3
+SF.ScrollBarImageColor3=C.accent
+SF.AutomaticCanvasSize=Enum.AutomaticSize.Y
+SF.CanvasSize=UDim2.new(0,0,0,0)
+SF.ZIndex=2
+local ListLayout=Instance.new("UIListLayout",SF)
+ListLayout.Padding=UDim.new(0,6)
+ListLayout.SortOrder=Enum.SortOrder.LayoutOrder
+Pad(SF,10,10,8,4)
 
 -- Status bar
-local StatusBar = Instance.new("Frame")
-StatusBar.Size = UDim2.new(1, -24, 0, 28)
-StatusBar.Position = UDim2.new(0, 12, 0, 56)
-StatusBar.BackgroundColor3 = Color3.fromRGB(18, 18, 30)
-StatusBar.BorderSizePixel = 0
-StatusBar.ZIndex = 2
-StatusBar.Parent = Main
-Instance.new("UICorner", StatusBar).CornerRadius = UDim.new(0, 6)
+local StatusBar=Instance.new("Frame",Body)
+StatusBar.Size=UDim2.new(1,-18,0,28)
+StatusBar.Position=UDim2.new(0,9,1,-32)
+StatusBar.BackgroundColor3=C.surface
+StatusBar.BorderSizePixel=0
+StatusBar.ZIndex=3
+Corner(StatusBar,7)
+Stroke(StatusBar,C.dim,1)
 
-local StatusDot = Instance.new("Frame")
-StatusDot.Size = UDim2.new(0, 8, 0, 8)
-StatusDot.Position = UDim2.new(0, 10, 0.5, -4)
-StatusDot.BackgroundColor3 = Color3.fromRGB(80, 80, 100)
-StatusDot.BorderSizePixel = 0
-StatusDot.ZIndex = 3
-StatusDot.Parent = StatusBar
-Instance.new("UICorner", StatusDot).CornerRadius = UDim.new(1, 0)
+local StatusTxt=Instance.new("TextLabel",StatusBar)
+StatusTxt.Size=UDim2.new(1,-12,1,0)
+StatusTxt.Position=UDim2.new(0,10,0,0)
+StatusTxt.BackgroundTransparency=1
+StatusTxt.Text="⬤  Idle  —  No farms active"
+StatusTxt.TextColor3=Color3.fromRGB(80,200,120)
+StatusTxt.Font=Enum.Font.Gotham
+StatusTxt.TextSize=10
+StatusTxt.TextXAlignment=Enum.TextXAlignment.Left
+StatusTxt.ZIndex=4
 
-local StatusTxt = Instance.new("TextLabel")
-StatusTxt.Size = UDim2.new(1, -30, 1, 0)
-StatusTxt.Position = UDim2.new(0, 26, 0, 0)
-StatusTxt.BackgroundTransparency = 1
-StatusTxt.Text = "Idle — Select a job to begin"
-StatusTxt.TextColor3 = Color3.fromRGB(160, 160, 190)
-StatusTxt.TextSize = 11
-StatusTxt.Font = Enum.Font.Gotham
-StatusTxt.TextXAlignment = Enum.TextXAlignment.Left
-StatusTxt.ZIndex = 3
-StatusTxt.Parent = StatusBar
+-- ── Section divider ───────────────────────────────────────────────
+local function Divider(txt,ord)
+    local D=Instance.new("Frame",SF)
+    D.Size=UDim2.new(1,0,0,22)
+    D.BackgroundTransparency=1
+    D.LayoutOrder=ord
 
-local function setStatus(txt, active)
-    StatusTxt.Text = txt
-    if active then
-        StatusDot.BackgroundColor3 = Color3.fromRGB(80, 220, 100)
-        TweenService:Create(StatusDot, TweenInfo.new(0.8, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true),
-            {BackgroundColor3 = Color3.fromRGB(40, 160, 60)}):Play()
-    else
-        StatusDot.BackgroundColor3 = Color3.fromRGB(80, 80, 100)
-    end
+    local line=Instance.new("Frame",D)
+    line.Size=UDim2.new(1,0,0,1)
+    line.Position=UDim2.new(0,0,0.5,0)
+    line.BackgroundColor3=C.dim
+    line.BorderSizePixel=0
+
+    local lbl=Instance.new("TextLabel",D)
+    lbl.Size=UDim2.new(0,120,1,0)
+    lbl.BackgroundColor3=C.bg
+    lbl.BorderSizePixel=0
+    lbl.Text=" "..txt.." "
+    lbl.TextColor3=C.muted
+    lbl.Font=Enum.Font.GothamBold
+    lbl.TextSize=10
+    lbl.TextXAlignment=Enum.TextXAlignment.Left
+lbl.ZIndex=3
 end
 
--- Scroll
-local Scroll = Instance.new("ScrollingFrame")
-Scroll.Size = UDim2.new(1, -24, 1, -96)
-Scroll.Position = UDim2.new(0, 12, 0, 90)
-Scroll.BackgroundTransparency = 1
-Scroll.ScrollBarThickness = 3
-Scroll.ScrollBarImageColor3 = Color3.fromRGB(90, 130, 255)
-Scroll.CanvasSize = UDim2.new(0, 0, 0, 0)
-Scroll.ZIndex = 2
-Scroll.Parent = Main
+-- ── Job card ─────────────────────────────────────────────────────
+local function Card(icon,title,desc,key,fn,ord)
+    local C2=Instance.new("Frame",SF)
+    C2.Size=UDim2.new(1,0,0,68)
+    C2.BackgroundColor3=C.card
+    C2.BorderSizePixel=0
+    C2.LayoutOrder=ord
+    C2.ZIndex=3
+    Corner(C2,10)
+    local cst=Stroke(C2,C.dim,1)
 
-local UIPad = Instance.new("UIPadding")
-UIPad.PaddingTop = UDim.new(0, 4)
-UIPad.Parent = Scroll
+    -- Icon box
+    local IB=Instance.new("Frame",C2)
+    IB.Size=UDim2.new(0,42,0,42)
+    IB.Position=UDim2.new(0,10,0.5,-21)
+    IB.BackgroundColor3=Color3.fromRGB(25,25,44)
+    IB.BorderSizePixel=0
+    IB.ZIndex=4
+    Corner(IB,9)
+    Stroke(IB,C.dim,1)
 
-local List = Instance.new("UIListLayout")
-List.Padding = UDim.new(0, 6)
-List.SortOrder = Enum.SortOrder.LayoutOrder
-List.Parent = Scroll
+    local IL=Instance.new("TextLabel",IB)
+    IL.Size=UDim2.fromScale(1,1)
+    IL.BackgroundTransparency=1
+    IL.Text=icon
+    IL.TextSize=20
+    IL.Font=Enum.Font.GothamBold
+    IL.TextColor3=Color3.fromRGB(255,255,255)
+    IL.ZIndex=5
 
-List:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
-    Scroll.CanvasSize = UDim2.new(0, 0, 0, List.AbsoluteContentSize.Y + 12)
-end)
+    -- Dot status indicator
+    local Dot=Instance.new("TextLabel",C2)
+    Dot.Size=UDim2.new(0,10,0,10)
+    Dot.Position=UDim2.new(0,42,0,8)
+    Dot.BackgroundTransparency=1
+    Dot.Text="●"
+    Dot.TextSize=8
+    Dot.Font=Enum.Font.GothamBold
+    Dot.TextColor3=C.dim
+    Dot.ZIndex=5
 
--- ================================================
---   TOGGLE ROW BUILDER
--- ================================================
+    -- Title
+    local TT=Instance.new("TextLabel",C2)
+    TT.Size=UDim2.new(0,160,0,20)
+    TT.Position=UDim2.new(0,62,0,12)
+    TT.BackgroundTransparency=1
+    TT.Text=title
+    TT.TextColor3=C.text
+    TT.Font=Enum.Font.GothamBold
+    TT.TextSize=13
+    TT.TextXAlignment=Enum.TextXAlignment.Left
+    TT.ZIndex=4
 
-local activeThreads = {}  -- jobKey -> coroutine thread token
-
-local function stopJob(jobKey)
-    if activeThreads[jobKey] then
-        activeThreads[jobKey] = false
-    end
-end
-
-local function stopAll()
-    for k in pairs(activeThreads) do
-        activeThreads[k] = false
-    end
-    setStatus("Idle — Select a job to begin", false)
-end
-
-local toggleButtons = {}
-
-local function makeJobRow(icon, label, jobKey, color, farmFn)
-    local Row = Instance.new("Frame")
-    Row.Size = UDim2.new(1, 0, 0, 44)
-    Row.BackgroundColor3 = Color3.fromRGB(18, 18, 28)
-    Row.BorderSizePixel = 0
-    Row.ZIndex = 2
-    Row.Parent = Scroll
-    Instance.new("UICorner", Row).CornerRadius = UDim.new(0, 8)
-
-    -- Left accent stripe
-    local Stripe = Instance.new("Frame")
-    Stripe.Size = UDim2.new(0, 3, 1, -12)
-    Stripe.Position = UDim2.new(0, 0, 0, 6)
-    Stripe.BackgroundColor3 = color
-    Stripe.BorderSizePixel = 0
-    Stripe.ZIndex = 3
-    Stripe.Parent = Row
-    Instance.new("UICorner", Stripe).CornerRadius = UDim.new(0, 2)
-
-    -- Icon
-    local Ico = Instance.new("TextLabel")
-    Ico.Size = UDim2.new(0, 28, 1, 0)
-    Ico.Position = UDim2.new(0, 10, 0, 0)
-    Ico.BackgroundTransparency = 1
-    Ico.Text = icon
-    Ico.TextSize = 16
-    Ico.Font = Enum.Font.GothamBold
-    Ico.ZIndex = 3
-    Ico.Parent = Row
-
-    -- Label
-    local Lbl = Instance.new("TextLabel")
-    Lbl.Size = UDim2.new(1, -90, 0, 18)
-    Lbl.Position = UDim2.new(0, 42, 0, 7)
-    Lbl.BackgroundTransparency = 1
-    Lbl.Text = label
-    Lbl.TextColor3 = Color3.fromRGB(220, 220, 240)
-    Lbl.TextSize = 12
-    Lbl.Font = Enum.Font.GothamSemibold
-    Lbl.TextXAlignment = Enum.TextXAlignment.Left
-    Lbl.ZIndex = 3
-    Lbl.Parent = Row
-
-    -- Sub status
-    local Sub = Instance.new("TextLabel")
-    Sub.Size = UDim2.new(1, -90, 0, 14)
-    Sub.Position = UDim2.new(0, 42, 0, 25)
-    Sub.BackgroundTransparency = 1
-    Sub.Text = "Off"
-    Sub.TextColor3 = Color3.fromRGB(90, 90, 110)
-    Sub.TextSize = 10
-    Sub.Font = Enum.Font.Gotham
-    Sub.TextXAlignment = Enum.TextXAlignment.Left
-    Sub.ZIndex = 3
-    Sub.Parent = Row
+    -- Desc
+    local DL=Instance.new("TextLabel",C2)
+    DL.Size=UDim2.new(0,160,0,15)
+    DL.Position=UDim2.new(0,62,0,33)
+    DL.BackgroundTransparency=1
+    DL.Text=desc
+    DL.TextColor3=C.muted
+    DL.Font=Enum.Font.Gotham
+    DL.TextSize=10
+    DL.TextXAlignment=Enum.TextXAlignment.Left
+    DL.ZIndex=4
 
     -- Toggle pill
-    local PillBg = Instance.new("TextButton")
-    PillBg.Size = UDim2.new(0, 44, 0, 22)
-    PillBg.Position = UDim2.new(1, -54, 0.5, -11)
-    PillBg.BackgroundColor3 = Color3.fromRGB(35, 35, 55)
-    PillBg.Text = ""
-    PillBg.BorderSizePixel = 0
-    PillBg.ZIndex = 3
-    PillBg.Parent = Row
-    Instance.new("UICorner", PillBg).CornerRadius = UDim.new(1, 0)
+    local Pill=Instance.new("TextButton",C2)
+    Pill.Size=UDim2.new(0,58,0,28)
+    Pill.Position=UDim2.new(1,-70,0.5,-14)
+    Pill.BackgroundColor3=Color3.fromRGB(35,35,55)
+    Pill.BorderSizePixel=0
+    Pill.Text=""
+    Pill.AutoButtonColor=false
+    Pill.ZIndex=5
+    Corner(Pill,14)
+    Stroke(Pill,C.dim,1)
 
-    local Knob = Instance.new("Frame")
-    Knob.Size = UDim2.new(0, 16, 0, 16)
-    Knob.Position = UDim2.new(0, 3, 0.5, -8)
-    Knob.BackgroundColor3 = Color3.fromRGB(80, 80, 100)
-    Knob.BorderSizePixel = 0
-    Knob.ZIndex = 4
-    Knob.Parent = PillBg
-    Instance.new("UICorner", Knob).CornerRadius = UDim.new(1, 0)
+    local PillLbl=Instance.new("TextLabel",Pill)
+    PillLbl.Size=UDim2.fromScale(1,1)
+    PillLbl.BackgroundTransparency=1
+    PillLbl.Text="OFF"
+    PillLbl.TextColor3=Color3.fromRGB(130,130,160)
+    PillLbl.Font=Enum.Font.GothamBold
+    PillLbl.TextSize=11
+    PillLbl.ZIndex=6
 
-    local isOn = false
-
-    local function setToggle(on)
-        isOn = on
-        if on then
-            TweenService:Create(PillBg, TweenInfo.new(0.2), {BackgroundColor3 = color}):Play()
-            TweenService:Create(Knob,   TweenInfo.new(0.2), {Position = UDim2.new(1, -19, 0.5, -8), BackgroundColor3 = Color3.fromRGB(255,255,255)}):Play()
-            Sub.Text = "Running..."
-            Sub.TextColor3 = color
-        else
-            TweenService:Create(PillBg, TweenInfo.new(0.2), {BackgroundColor3 = Color3.fromRGB(35,35,55)}):Play()
-            TweenService:Create(Knob,   TweenInfo.new(0.2), {Position = UDim2.new(0, 3, 0.5, -8), BackgroundColor3 = Color3.fromRGB(80,80,100)}):Play()
-            Sub.Text = "Off"
-            Sub.TextColor3 = Color3.fromRGB(90,90,110)
-        end
-    end
-
-    toggleButtons[jobKey] = setToggle
-
-    PillBg.MouseButton1Click:Connect(function()
-        if isOn then
-            -- Turn off
-            stopJob(jobKey)
-            setToggle(false)
-            setStatus("Idle — Select a job to begin", false)
-        else
-            -- Stop any other running job
-            stopAll()
-            for k, fn in pairs(toggleButtons) do
-                if k ~= jobKey then fn(false) end
-            end
-            -- Turn on
-            setToggle(true)
-            setStatus("⚙ Starting " .. label, true)
-            -- Token
-            local token = {}
-            activeThreads[jobKey] = token
-            task.spawn(function()
-                -- Join job first
-                joinJob(jobKey, label, function(s) setStatus(s, true) end)
-                -- Run farm
-                farmFn(token, function(s)
-                    Sub.Text = s
-                    setStatus(label .. " — " .. s, true)
-                end)
-                -- Farm ended
-                if activeThreads[jobKey] == token then
-                    activeThreads[jobKey] = false
-                    setToggle(false)
-                    setStatus("Idle — Select a job to begin", false)
-                end
-            end)
-        end
+    -- Hover glow
+    Pill.MouseEnter:Connect(function()
+        if not State[key] then TW(Pill,0.15,{BackgroundColor3=Color3.fromRGB(45,45,70)}) end
+    end)
+    Pill.MouseLeave:Connect(function()
+        if not State[key] then TW(Pill,0.15,{BackgroundColor3=Color3.fromRGB(35,35,55)}) end
     end)
 
-    return Row
+    Pill.MouseButton1Click:Connect(function()
+        ToggleFarm(key,fn,Pill,PillLbl,cst,Dot)
+    end)
+
+    return Dot
 end
 
--- Section header
-local function makeHeader(txt)
-    local f = Instance.new("Frame")
-    f.Size = UDim2.new(1, 0, 0, 18)
-    f.BackgroundTransparency = 1
-    f.ZIndex = 2
-    f.Parent = Scroll
+-- ── Build job list ────────────────────────────────────────────────
+Divider("LEGAL JOBS", 1)
+Card("🏥","Nurse Farm",        "Fetch items for patients",     "NurseFarm",    NurseLoop,    2)
+Card("📦","Delivery Farm",     "Auto-deliver • 5★ forced",     "DeliveryFarm", DeliveryLoop, 3)
+Card("🚔","Police Farm",       "Patrol & arrest criminals",    "PoliceFarm",   PoliceLoop,   4)
+Card("🍔","Fry Cook Farm",     "Cook orders at NomBurger",     "FryCookFarm",  FryCookLoop,  5)
+Divider("CRIME", 6)
+Card("💰","Criminal Farm",     "Rob stores & banks, escape",   "CriminalFarm", CriminalLoop, 7)
 
-    local l = Instance.new("TextLabel")
-    l.Size = UDim2.new(1, 0, 1, 0)
-    l.BackgroundTransparency = 1
-    l.Text = txt:upper()
-    l.TextColor3 = Color3.fromRGB(60, 70, 110)
-    l.TextSize = 9
-    l.Font = Enum.Font.GothamBold
-    l.TextXAlignment = Enum.TextXAlignment.Left
-    l.LetterSpacing = 3
-    l.ZIndex = 3
-    l.Parent = f
-end
-
--- ================================================
---   FARM FUNCTIONS
---   Each returns when token is invalidated
---   statusFn(string) updates the row sub-label
--- ================================================
-
--- Shared: approach a part smoothly without teleporting
-local function approachAndInteract(part, token, arrivedCb)
-    if not part then return end
-    local pos = getPos(part)
-    if not pos then return end
-    local hrp = getHRP()
-    if not hrp then return end
-    -- Only TP if very far, otherwise walk
-    local dist = (hrp.Position - pos).Magnitude
-    if dist > 40 then
-        safeTp(CFrame.new(pos + Vector3.new(0, 0, 3.5)), 0.5)
-    else
-        walkTo(pos, 6)
-    end
-    if arrivedCb then arrivedCb() end
-    interact(part)
-    task.wait(0.4)
-end
-
--- ─── PIZZA DELIVERY (5-star optimized) ──────────────────
-local function farmPizza(token, statusFn)
-    -- Known pizza delivery steps: pick up order → deliver fast → return fast
-    -- Speed boost during delivery for 5-star rating (time-based)
-    local hum = getHum()
-    if hum then hum.WalkSpeed = 28 end  -- faster walk for better rating
-
-    while token and activeThreads["PizzaDelivery"] == token do
-        statusFn("Finding order counter")
-        local counter = findPart({"pizzaorder","orderstation","pickupstation","counter","pizzacounter","orderpickup"})
-        if counter then
-            approachAndInteract(counter, token, function() statusFn("Picking up order") end)
-            task.wait(0.8)
-        end
-
-        statusFn("Delivering — 5★ rush!")
-        local deliver = findPart({"deliveryspot","deliverpoint","deliver","dropoff","customer","house","pizzadrop"})
-        if deliver then
-            -- Sprint to delivery
-            local h = getHum()
-            if h then h.WalkSpeed = 36 end
-            approachAndInteract(deliver, token, function() statusFn("Dropping off order") end)
-            task.wait(0.5)
-            if h then h.WalkSpeed = 28 end
-        end
-
-        -- Return to shop fast for next order (keeps queue and rating high)
-        statusFn("Returning to shop")
-        local shop = findPart({"pizzashop","pizzaplace","pizzeria","shop","restaurant"})
-        if shop then
-            approachAndInteract(shop, token, nil)
-        end
-
-        -- Collect tip / interact with cash register
-        local register = findPart({"register","cashier","tip","collect","pay"})
-        if register then
-            approachAndInteract(register, token, function() statusFn("Collecting payment") end)
-        end
-
-        task.wait(1)
-    end
-    local h = getHum(); if h then h.WalkSpeed = 16 end
-end
-
--- ─── POLICE ─────────────────────────────────────────────
-local function farmPolice(token, statusFn)
-    while token and activeThreads["Police"] == token do
-        statusFn("Checking dispatch")
-        local dispatch = findPart({"dispatch","police","station","clk","clock","duty"})
-        if dispatch then
-            approachAndInteract(dispatch, token, function() statusFn("Clocking in") end)
-            task.wait(1)
-        end
-
-        statusFn("Patrolling for criminals")
-        local target = findPart({"arrest","handcuff","criminal","wanted","suspect","rob"})
-        if target then
-            approachAndInteract(target, token, function() statusFn("Arresting suspect") end)
-            task.wait(1.5)
-        else
-            -- Patrol to common crime spots
-            task.wait(3)
-        end
-
-        local evidence = findPart({"evidence","report","filing","station","desk"})
-        if evidence then
-            approachAndInteract(evidence, token, function() statusFn("Filing report") end)
-            task.wait(1)
-        end
-        task.wait(1)
-    end
-end
-
--- ─── MINER ──────────────────────────────────────────────
-local function farmMiner(token, statusFn)
-    while token and activeThreads["Miner"] == token do
-        statusFn("Finding ore")
-        local ore = findPart({"rock","ore","coal","gem","stone","mineral","deposit"})
-        if ore then
-            approachAndInteract(ore, token, function() statusFn("Mining ore") end)
-            task.wait(1.5)
-        end
-
-        statusFn("Selling ore")
-        local sell = findPart({"sell","deposit","cart","chest","sellpoint","minestore"})
-        if sell then
-            approachAndInteract(sell, token, function() statusFn("Depositing ore") end)
-            task.wait(1)
-        end
-        task.wait(0.8)
-    end
-end
-
--- ─── FISHERMAN ──────────────────────────────────────────
-local function farmFisher(token, statusFn)
-    while token and activeThreads["Fisher"] == token do
-        statusFn("Going to fishing spot")
-        local dock = findPart({"fishspot","dock","pier","fishingrod","fish","cast","water"})
-        if dock then
-            local pos = getPos(dock)
-            if pos then
-                -- Walk to dock edge, don't TP into water
-                local hrp = getHRP()
-                if hrp then
-                    local dist = (hrp.Position - pos).Magnitude
-                    if dist > 30 then
-                        safeTp(CFrame.new(pos + Vector3.new(0, 0, 4)), 0.5)
-                    end
-                end
-                interact(dock)
-                statusFn("Fishing... (waiting for catch)")
-                task.wait(4)   -- fishing animation time
-                interact(dock) -- reel in
-                task.wait(0.5)
+-- ── Status updater ───────────────────────────────────────────────
+task.spawn(function()
+    while task.wait(1) do
+        local active={}
+        for k,v in pairs(State) do
+            if v==true and k~="Dragging" and k~="Mini" then
+                table.insert(active,k:gsub("Farm",""))
             end
         end
-
-        statusFn("Selling fish")
-        local sell = findPart({"fishmarket","fishsell","sell","market","store"})
-        if sell then
-            approachAndInteract(sell, token, function() statusFn("Selling catch") end)
-            task.wait(1)
-        end
-        task.wait(0.5)
-    end
-end
-
--- ─── DOCTOR ─────────────────────────────────────────────
-local function farmDoctor(token, statusFn)
-    while token and activeThreads["Doctor"] == token do
-        statusFn("Checking in at hospital")
-        local desk = findPart({"desk","checkin","reception","nurse","station","hospital"})
-        if desk then
-            approachAndInteract(desk, token, function() statusFn("Clocked in") end)
-            task.wait(1)
-        end
-
-        statusFn("Finding patient")
-        local patient = findPart({"patient","bed","treat","heal","sick","examine"})
-        if patient then
-            approachAndInteract(patient, token, function() statusFn("Treating patient") end)
-            task.wait(2.5)
-        end
-
-        local med = findPart({"medicine","prescription","pharmacy","drug","supply"})
-        if med then
-            approachAndInteract(med, token, function() statusFn("Getting medicine") end)
-            task.wait(1)
-        end
-        task.wait(1)
-    end
-end
-
--- ─── FIREFIGHTER ────────────────────────────────────────
-local function farmFirefighter(token, statusFn)
-    while token and activeThreads["Firefighter"] == token do
-        statusFn("Checking for fires")
-        local fire = findPart({"fire","flame","burning","blaze","smoke","alarm"})
-        if fire then
-            approachAndInteract(fire, token, function() statusFn("Extinguishing fire") end)
-            task.wait(3)
+        if #active==0 then
+            StatusTxt.Text="⬤  Idle  —  No farms active"
+            StatusTxt.TextColor3=Color3.fromRGB(80,200,120)
         else
-            statusFn("No active fires — waiting")
-            task.wait(4)
+            StatusTxt.Text="▶  "..table.concat(active," • ")
+            StatusTxt.TextColor3=Color3.fromRGB(250,204,21)
         end
-
-        statusFn("Returning to station")
-        local station = findPart({"firestation","firetruck","truck","hose","firehouse"})
-        if station then
-            approachAndInteract(station, token, function() statusFn("Restocking equipment") end)
-            task.wait(1)
-        end
-        task.wait(1)
-    end
-end
-
--- ─── MECHANIC ───────────────────────────────────────────
-local function farmMechanic(token, statusFn)
-    while token and activeThreads["Mechanic"] == token do
-        statusFn("Finding vehicle to repair")
-        local car = findPart({"repair","broken","vehicle","car","wrench","mechanic","fix"})
-        if car then
-            approachAndInteract(car, token, function() statusFn("Repairing vehicle") end)
-            task.wait(2.5)
-        end
-
-        statusFn("Collecting payment")
-        local pay = findPart({"pay","register","collect","cashier","payment"})
-        if pay then
-            approachAndInteract(pay, token, function() statusFn("Payment received") end)
-            task.wait(1)
-        end
-        task.wait(1)
-    end
-end
-
--- ─── CASHIER ────────────────────────────────────────────
-local function farmCashier(token, statusFn)
-    while token and activeThreads["Cashier"] == token do
-        statusFn("Going to register")
-        local reg = findPart({"register","cashier","checkout","till","scan","counter"})
-        if reg then
-            approachAndInteract(reg, token, function() statusFn("At register") end)
-            task.wait(0.5)
-        end
-
-        statusFn("Scanning items")
-        local item = findPart({"item","scan","product","barcode","grocerie","good"})
-        if item then
-            approachAndInteract(item, token, function() statusFn("Item scanned") end)
-            task.wait(0.8)
-        end
-
-        statusFn("Processing sale")
-        task.wait(1)
-
-        local done = findPart({"complete","done","finish","sale","receipt"})
-        if done then
-            approachAndInteract(done, token, function() statusFn("Sale complete") end)
-            task.wait(0.5)
-        end
-        task.wait(0.8)
-    end
-end
-
--- ─── BANKER ─────────────────────────────────────────────
-local function farmBanker(token, statusFn)
-    while token and activeThreads["Banker"] == token do
-        statusFn("Going to teller window")
-        local teller = findPart({"teller","banker","bank","vault","window","counter"})
-        if teller then
-            approachAndInteract(teller, token, function() statusFn("At teller window") end)
-            task.wait(1)
-        end
-
-        statusFn("Processing transaction")
-        local trans = findPart({"transaction","deposit","withdraw","transfer","safe"})
-        if trans then
-            approachAndInteract(trans, token, function() statusFn("Transaction done") end)
-            task.wait(2)
-        end
-        task.wait(1)
-    end
-end
-
--- ─── CRIMINAL ───────────────────────────────────────────
-local function farmCriminal(token, statusFn)
-    while token and activeThreads["Criminal"] == token do
-        statusFn("Scouting robbery target")
-        local target = findPart({"rob","steal","vault","loot","heist","break","burglar"})
-        if target then
-            approachAndInteract(target, token, function() statusFn("Robbing...") end)
-            task.wait(3)
-        end
-
-        statusFn("Escaping to hideout")
-        local hide = findPart({"hideout","escape","safe","launder","fence","criminal"})
-        if hide then
-            approachAndInteract(hide, token, function() statusFn("Laundering money") end)
-            task.wait(2)
-        end
-        task.wait(1)
-    end
-end
-
--- ================================================
---   BUILD UI ROWS
--- ================================================
-
-makeHeader("  Delivery")
-makeJobRow("🍕","Pizza Delivery","PizzaDelivery", Color3.fromRGB(255,130,30),  farmPizza)
-
-makeHeader("  Emergency")
-makeJobRow("👮","Police Officer","Police",      Color3.fromRGB(60,100,255),  farmPolice)
-makeJobRow("🚒","Firefighter",   "Firefighter", Color3.fromRGB(220,70,30),   farmFirefighter)
-makeJobRow("🏥","Doctor / Nurse","Doctor",      Color3.fromRGB(220,50,80),   farmDoctor)
-
-makeHeader("  Labour")
-makeJobRow("⛏️","Miner",         "Miner",       Color3.fromRGB(160,110,40),  farmMiner)
-makeJobRow("🎣","Fisherman",     "Fisher",      Color3.fromRGB(40,150,210),  farmFisher)
-makeJobRow("🔧","Mechanic",      "Mechanic",    Color3.fromRGB(100,100,115), farmMechanic)
-
-makeHeader("  Commerce")
-makeJobRow("🛒","Cashier",       "Cashier",     Color3.fromRGB(40,180,90),   farmCashier)
-makeJobRow("🏦","Banker",        "Banker",      Color3.fromRGB(200,165,30),  farmBanker)
-
-makeHeader("  Illegal")
-makeJobRow("🦹","Criminal",      "Criminal",    Color3.fromRGB(180,30,30),   farmCriminal)
-
-makeHeader("  Controls")
-local StopRow = Instance.new("Frame")
-StopRow.Size = UDim2.new(1, 0, 0, 36)
-StopRow.BackgroundColor3 = Color3.fromRGB(30, 15, 15)
-StopRow.BorderSizePixel = 0
-StopRow.ZIndex = 2
-StopRow.Parent = Scroll
-Instance.new("UICorner", StopRow).CornerRadius = UDim.new(0, 8)
-
-local StopBtn = Instance.new("TextButton")
-StopBtn.Size = UDim2.new(1, -16, 0, 24)
-StopBtn.Position = UDim2.new(0, 8, 0.5, -12)
-StopBtn.BackgroundColor3 = Color3.fromRGB(180, 30, 30)
-StopBtn.Text = "⏹  Stop All Farming"
-StopBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-StopBtn.TextSize = 12
-StopBtn.Font = Enum.Font.GothamBold
-StopBtn.BorderSizePixel = 0
-StopBtn.ZIndex = 3
-StopBtn.Parent = StopRow
-Instance.new("UICorner", StopBtn).CornerRadius = UDim.new(0, 6)
-
-StopBtn.MouseButton1Click:Connect(function()
-    stopAll()
-    for _, fn in pairs(toggleButtons) do fn(false) end
-end)
-
-local HintRow = Instance.new("TextLabel")
-HintRow.Size = UDim2.new(1, 0, 0, 28)
-HintRow.BackgroundTransparency = 1
-HintRow.Text = "RightAlt → toggle GUI visibility"
-HintRow.TextColor3 = Color3.fromRGB(55, 55, 80)
-HintRow.TextSize = 10
-HintRow.Font = Enum.Font.Gotham
-HintRow.ZIndex = 2
-HintRow.Parent = Scroll
-
--- ================================================
---   KEYBIND
--- ================================================
-
-UIS.InputBegan:Connect(function(input, gpe)
-    if gpe then return end
-    if input.KeyCode == Enum.KeyCode.RightAlt then
-        Main.Visible = not Main.Visible
-        Shadow.Visible = Main.Visible
     end
 end)
 
-print("[RC AutoFarm v2] Loaded — Toggle jobs from the GUI")
+-- ── Drag (titlebar) ───────────────────────────────────────────────
+local dStart,dPos
+TitleBar.InputBegan:Connect(function(i)
+    if i.UserInputType==Enum.UserInputType.MouseButton1 or i.UserInputType==Enum.UserInputType.Touch then
+        State.Dragging=true; dStart=i.Position; dPos=MF.Position
+    end
+end)
+TitleBar.InputEnded:Connect(function(i)
+    if i.UserInputType==Enum.UserInputType.MouseButton1 or i.UserInputType==Enum.UserInputType.Touch then
+        State.Dragging=false
+    end
+end)
+UserInputService.InputChanged:Connect(function(i)
+    if State.Dragging and(i.UserInputType==Enum.UserInputType.MouseMovement or i.UserInputType==Enum.UserInputType.Touch) then
+        local d=i.Position-dStart
+        MF.Position=UDim2.new(dPos.X.Scale,dPos.X.Offset+d.X,dPos.Y.Scale,dPos.Y.Offset+d.Y)
+    end
+end)
+
+-- ── Mini / expand toggle ─────────────────────────────────────────
+MiniBtn.MouseButton1Click:Connect(function()
+    State.Mini=not State.Mini
+    if State.Mini then
+        TW(MF,0.25,{Size=UDim2.new(0,320,0,MINI_H)})
+        TweenService:Create(Body,TweenInfo.new(0.2,Enum.EasingStyle.Quart),{Position=UDim2.new(0,0,0,FULL_H)}):Play()
+        MiniBtn.Text="□"
+        task.delay(0.05,function() Body.Visible=false end)
+    else
+        Body.Visible=true
+        Body.Position=UDim2.new(0,0,0,FULL_H)
+        TW(MF,0.28,{Size=UDim2.new(0,320,0,FULL_H)})
+        TW(Body,0.28,{Position=UDim2.new(0,0,0,50)})
+        MiniBtn.Text="—"
+    end
+end)
+
+-- ── Map check & show main frame ──────────────────────────────────
+task.wait(2.0)   -- wait for intro to clear
+MF.Visible=true
+TW(MF,0.4,{BackgroundTransparency=0})
+
+if not IsModernMap() then
+    -- ── Warn overlay (shown inside the menu when on wrong map) ──
+    MapBadge.Text="● CLASSIC"
+    MapBadge.TextColor3=C.red
+    MapBadge.BackgroundColor3=Color3.fromRGB(60,18,18)
+
+    local Lock=Instance.new("Frame",MF)
+    Lock.Size=UDim2.fromScale(1,1)
+    Lock.BackgroundColor3=Color3.fromRGB(0,0,0)
+    Lock.BackgroundTransparency=0.45
+    Lock.BorderSizePixel=0
+    Lock.ZIndex=50
+    Corner(Lock,14)
+
+    local LockIcon=Instance.new("TextLabel",Lock)
+    LockIcon.Size=UDim2.new(1,0,0,50)
+    LockIcon.Position=UDim2.new(0,0,0.3,-25)
+    LockIcon.BackgroundTransparency=1
+    LockIcon.Text="🔒"
+    LockIcon.TextSize=34
+    LockIcon.Font=Enum.Font.GothamBold
+    LockIcon.ZIndex=51
+
+    local LockMsg=Instance.new("TextLabel",Lock)
+    LockMsg.Size=UDim2.new(1,-30,0,40)
+    LockMsg.Position=UDim2.new(0,15,0.3,30)
+    LockMsg.BackgroundTransparency=1
+    LockMsg.Text="Modern Map Required"
+    LockMsg.TextColor3=C.red
+    LockMsg.Font=Enum.Font.GothamBold
+    LockMsg.TextSize=16
+    LockMsg.TextWrapped=true
+    LockMsg.ZIndex=51
+
+    local LockSub=Instance.new("TextLabel",Lock)
+    LockSub.Size=UDim2.new(1,-30,0,30)
+    LockSub.Position=UDim2.new(0,15,0.3,68)
+    LockSub.BackgroundTransparency=1
+    LockSub.Text="Switch to unlock all auto farms"
+    LockSub.TextColor3=Color3.fromRGB(200,180,180)
+    LockSub.Font=Enum.Font.Gotham
+    LockSub.TextSize=12
+    LockSub.TextWrapped=true
+    LockSub.ZIndex=51
+
+    local TpBtn=Instance.new("TextButton",Lock)
+    TpBtn.Size=UDim2.new(0,200,0,38)
+    TpBtn.Position=UDim2.new(0.5,-100,0.3,106)
+    TpBtn.BackgroundColor3=C.accent
+    TpBtn.Text="🚀  Join Modern Map"
+    TpBtn.TextColor3=Color3.fromRGB(255,255,255)
+    TpBtn.Font=Enum.Font.GothamBold
+    TpBtn.TextSize=13
+    TpBtn.BorderSizePixel=0
+    TpBtn.ZIndex=52
+    Corner(TpBtn,9)
+    TpBtn.MouseButton1Click:Connect(function()
+        TpBtn.Text="Teleporting..."
+        TpBtn.BackgroundColor3=Color3.fromRGB(60,60,80)
+        pcall(function() TeleportService:Teleport(MODERN_PLACE_ID,Player) end)
+    end)
+end
+
+-- ── Respawn handler ──────────────────────────────────────────────
+Player.CharacterAdded:Connect(function(nc)
+    Character=nc
+    HRP=nc:WaitForChild("HumanoidRootPart")
+    Humanoid=nc:WaitForChild("Humanoid")
+end)
