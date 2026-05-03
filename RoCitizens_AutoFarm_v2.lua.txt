@@ -1,0 +1,861 @@
+-- ================================================
+--   Ro-Citizens Auto Farm v2
+--   Clean UI | Toggles | Job Join | Smart Farm
+-- ================================================
+
+local Players       = game:GetService("Players")
+local RunService    = game:GetService("RunService")
+local TweenService  = game:GetService("TweenService")
+local UIS           = game:GetService("UserInputService")
+local LP            = Players.LocalPlayer
+
+-- ================================================
+--   UTILITIES
+-- ================================================
+
+local function getChar() return LP.Character end
+local function getHRP()  local c=getChar(); return c and c:FindFirstChild("HumanoidRootPart") end
+local function getHum()  local c=getChar(); return c and c:FindFirstChildOfClass("Humanoid") end
+
+-- Safe teleport — waits for character, no spam
+local function safeTp(cf, waitAfter)
+    local hrp = getHRP()
+    if not hrp then return end
+    hrp.CFrame = cf
+    task.wait(waitAfter or 0.6)
+end
+
+-- Walk humanoid to position and yield until arrived or timeout
+local function walkTo(pos, timeout)
+    local hum = getHum()
+    local hrp = getHRP()
+    if not hum or not hrp then return end
+    hum:MoveTo(pos)
+    local t = 0
+    repeat
+        task.wait(0.1)
+        t = t + 0.1
+        if t > (timeout or 8) then break end
+    until (hrp.Position - pos).Magnitude < 5 or not hum
+end
+
+-- Fire all ProximityPrompts and ClickDetectors on/in a part
+local function interact(part)
+    if not part then return end
+    for _, v in ipairs(part:GetDescendants()) do
+        if v:IsA("ProximityPrompt") then
+            fireproximityprompt(v)
+            task.wait(0.2)
+        elseif v:IsA("ClickDetector") then
+            fireclickdetector(v)
+            task.wait(0.2)
+        end
+    end
+    -- also check parent chain up 2 levels
+    local p = part.Parent
+    for i = 1, 2 do
+        if p then
+            for _, v in ipairs(p:GetChildren()) do
+                if v:IsA("ProximityPrompt") then fireproximityprompt(v); task.wait(0.1) end
+                if v:IsA("ClickDetector")   then fireclickdetector(v);   task.wait(0.1) end
+            end
+            p = p.Parent
+        end
+    end
+end
+
+-- Find part by name list, returns {part, position}
+local function findPart(names, maxDist)
+    maxDist = maxDist or 999
+    local hrp = getHRP()
+    if not hrp then return nil end
+    local best, bestDist = nil, maxDist
+    for _, obj in ipairs(workspace:GetDescendants()) do
+        if obj:IsA("BasePart") or obj:IsA("Model") then
+            local n = obj.Name:lower()
+            for _, name in ipairs(names) do
+                if n:find(name:lower()) then
+                    local pos = obj:IsA("Model") and obj.PrimaryPart and obj.PrimaryPart.Position
+                              or (obj:IsA("BasePart") and obj.Position)
+                    if pos then
+                        local d = (hrp.Position - pos).Magnitude
+                        if d < bestDist then best, bestDist = obj, d end
+                    end
+                    break
+                end
+            end
+        end
+    end
+    return best
+end
+
+local function getPos(obj)
+    if not obj then return nil end
+    if obj:IsA("Model") then
+        return obj.PrimaryPart and obj.PrimaryPart.Position or obj:GetModelCFrame().Position
+    end
+    return obj.Position
+end
+
+-- ================================================
+--   JOB CIRCLE POSITIONS (Ro-Citizens map)
+--   These are approximate — adjust to your server
+-- ================================================
+
+local JOB_CIRCLES = {
+    PizzaDelivery = CFrame.new(92, 3, -215),
+    Police        = CFrame.new(-180, 3, 80),
+    Miner         = CFrame.new(280, 3, 340),
+    Fisher        = CFrame.new(-320, 3, -100),
+    Doctor        = CFrame.new(30, 3, 120),
+    Firefighter   = CFrame.new(-80, 3, -310),
+    Mechanic      = CFrame.new(200, 3, -50),
+    Cashier       = CFrame.new(60, 3, -80),
+    Banker        = CFrame.new(-10, 3, 200),
+    Criminal      = CFrame.new(350, 3, -350),
+}
+
+-- Join job: TP to circle, stand in it, interact with prompt
+local function joinJob(jobKey, displayName, statusFn)
+    local cf = JOB_CIRCLES[jobKey]
+    if not cf then return end
+    statusFn("Joining " .. displayName .. " job...")
+    safeTp(cf, 0.5)
+    -- Find job join prompt near us
+    local hrp = getHRP()
+    if not hrp then return end
+    for _, obj in ipairs(workspace:GetDescendants()) do
+        if obj:IsA("ProximityPrompt") or obj:IsA("ClickDetector") then
+            local pos = obj.Parent and obj.Parent:IsA("BasePart") and obj.Parent.Position
+                      or (obj:IsA("BasePart") and obj.Position)
+            if pos and (hrp.Position - pos).Magnitude < 15 then
+                if obj:IsA("ProximityPrompt") then fireproximityprompt(obj) end
+                if obj:IsA("ClickDetector")   then fireclickdetector(obj)   end
+                task.wait(0.3)
+            end
+        end
+    end
+    task.wait(1.5)
+    statusFn(displayName .. " — Farming...")
+end
+
+-- ================================================
+--   GUI SETUP
+-- ================================================
+
+-- Remove old GUI
+pcall(function()
+    game:GetService("CoreGui"):FindFirstChild("RCFarmV2"):Destroy()
+end)
+
+local CoreGui = game:GetService("CoreGui")
+local Gui = Instance.new("ScreenGui")
+Gui.Name = "RCFarmV2"
+Gui.ResetOnSpawn = false
+Gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+Gui.Parent = CoreGui
+
+-- Shadow
+local Shadow = Instance.new("Frame")
+Shadow.Size = UDim2.new(0, 310, 0, 500)
+Shadow.Position = UDim2.new(0, 18, 0.5, -247)
+Shadow.BackgroundColor3 = Color3.fromRGB(0,0,0)
+Shadow.BackgroundTransparency = 0.6
+Shadow.BorderSizePixel = 0
+Shadow.ZIndex = 0
+Shadow.Parent = Gui
+Instance.new("UICorner", Shadow).CornerRadius = UDim.new(0,14)
+
+-- Main
+local Main = Instance.new("Frame")
+Main.Name = "Main"
+Main.Size = UDim2.new(0, 300, 0, 490)
+Main.Position = UDim2.new(0, 14, 0.5, -245)
+Main.BackgroundColor3 = Color3.fromRGB(12, 12, 18)
+Main.BorderSizePixel = 0
+Main.Active = true
+Main.Draggable = true
+Main.ZIndex = 1
+Main.Parent = Gui
+Instance.new("UICorner", Main).CornerRadius = UDim.new(0,12)
+
+-- Accent line top
+local Accent = Instance.new("Frame")
+Accent.Size = UDim2.new(1, 0, 0, 2)
+Accent.BackgroundColor3 = Color3.fromRGB(90, 130, 255)
+Accent.BorderSizePixel = 0
+Accent.ZIndex = 2
+Accent.Parent = Main
+
+-- Header
+local Header = Instance.new("Frame")
+Header.Size = UDim2.new(1, 0, 0, 48)
+Header.Position = UDim2.new(0, 0, 0, 2)
+Header.BackgroundTransparency = 1
+Header.ZIndex = 2
+Header.Parent = Main
+
+local Icon = Instance.new("TextLabel")
+Icon.Size = UDim2.new(0, 30, 1, 0)
+Icon.Position = UDim2.new(0, 12, 0, 0)
+Icon.BackgroundTransparency = 1
+Icon.Text = "💼"
+Icon.TextSize = 18
+Icon.Font = Enum.Font.GothamBold
+Icon.ZIndex = 2
+Icon.Parent = Header
+
+local Title = Instance.new("TextLabel")
+Title.Size = UDim2.new(1, -80, 0, 24)
+Title.Position = UDim2.new(0, 44, 0, 7)
+Title.BackgroundTransparency = 1
+Title.Text = "Ro-Citizens Farm"
+Title.TextColor3 = Color3.fromRGB(240, 240, 255)
+Title.TextSize = 15
+Title.Font = Enum.Font.GothamBold
+Title.TextXAlignment = Enum.TextXAlignment.Left
+Title.ZIndex = 2
+Title.Parent = Header
+
+local SubTitle = Instance.new("TextLabel")
+SubTitle.Size = UDim2.new(1, -80, 0, 14)
+SubTitle.Position = UDim2.new(0, 44, 0, 30)
+SubTitle.BackgroundTransparency = 1
+SubTitle.Text = "Auto Farm v2"
+SubTitle.TextColor3 = Color3.fromRGB(90, 130, 255)
+SubTitle.TextSize = 10
+SubTitle.Font = Enum.Font.Gotham
+SubTitle.TextXAlignment = Enum.TextXAlignment.Left
+SubTitle.ZIndex = 2
+SubTitle.Parent = Header
+
+-- Close
+local CloseBtn = Instance.new("TextButton")
+CloseBtn.Size = UDim2.new(0, 26, 0, 26)
+CloseBtn.Position = UDim2.new(1, -34, 0, 11)
+CloseBtn.BackgroundColor3 = Color3.fromRGB(40, 40, 60)
+CloseBtn.Text = "✕"
+CloseBtn.TextColor3 = Color3.fromRGB(180, 180, 200)
+CloseBtn.TextSize = 12
+CloseBtn.Font = Enum.Font.GothamBold
+CloseBtn.BorderSizePixel = 0
+CloseBtn.ZIndex = 2
+CloseBtn.Parent = Header
+Instance.new("UICorner", CloseBtn).CornerRadius = UDim.new(0, 6)
+CloseBtn.MouseButton1Click:Connect(function() Gui:Destroy() end)
+
+-- Divider
+local Div = Instance.new("Frame")
+Div.Size = UDim2.new(1, -24, 0, 1)
+Div.Position = UDim2.new(0, 12, 0, 50)
+Div.BackgroundColor3 = Color3.fromRGB(30, 30, 50)
+Div.BorderSizePixel = 0
+Div.ZIndex = 2
+Div.Parent = Main
+
+-- Status bar
+local StatusBar = Instance.new("Frame")
+StatusBar.Size = UDim2.new(1, -24, 0, 28)
+StatusBar.Position = UDim2.new(0, 12, 0, 56)
+StatusBar.BackgroundColor3 = Color3.fromRGB(18, 18, 30)
+StatusBar.BorderSizePixel = 0
+StatusBar.ZIndex = 2
+StatusBar.Parent = Main
+Instance.new("UICorner", StatusBar).CornerRadius = UDim.new(0, 6)
+
+local StatusDot = Instance.new("Frame")
+StatusDot.Size = UDim2.new(0, 8, 0, 8)
+StatusDot.Position = UDim2.new(0, 10, 0.5, -4)
+StatusDot.BackgroundColor3 = Color3.fromRGB(80, 80, 100)
+StatusDot.BorderSizePixel = 0
+StatusDot.ZIndex = 3
+StatusDot.Parent = StatusBar
+Instance.new("UICorner", StatusDot).CornerRadius = UDim.new(1, 0)
+
+local StatusTxt = Instance.new("TextLabel")
+StatusTxt.Size = UDim2.new(1, -30, 1, 0)
+StatusTxt.Position = UDim2.new(0, 26, 0, 0)
+StatusTxt.BackgroundTransparency = 1
+StatusTxt.Text = "Idle — Select a job to begin"
+StatusTxt.TextColor3 = Color3.fromRGB(160, 160, 190)
+StatusTxt.TextSize = 11
+StatusTxt.Font = Enum.Font.Gotham
+StatusTxt.TextXAlignment = Enum.TextXAlignment.Left
+StatusTxt.ZIndex = 3
+StatusTxt.Parent = StatusBar
+
+local function setStatus(txt, active)
+    StatusTxt.Text = txt
+    if active then
+        StatusDot.BackgroundColor3 = Color3.fromRGB(80, 220, 100)
+        TweenService:Create(StatusDot, TweenInfo.new(0.8, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true),
+            {BackgroundColor3 = Color3.fromRGB(40, 160, 60)}):Play()
+    else
+        StatusDot.BackgroundColor3 = Color3.fromRGB(80, 80, 100)
+    end
+end
+
+-- Scroll
+local Scroll = Instance.new("ScrollingFrame")
+Scroll.Size = UDim2.new(1, -24, 1, -96)
+Scroll.Position = UDim2.new(0, 12, 0, 90)
+Scroll.BackgroundTransparency = 1
+Scroll.ScrollBarThickness = 3
+Scroll.ScrollBarImageColor3 = Color3.fromRGB(90, 130, 255)
+Scroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+Scroll.ZIndex = 2
+Scroll.Parent = Main
+
+local UIPad = Instance.new("UIPadding")
+UIPad.PaddingTop = UDim.new(0, 4)
+UIPad.Parent = Scroll
+
+local List = Instance.new("UIListLayout")
+List.Padding = UDim.new(0, 6)
+List.SortOrder = Enum.SortOrder.LayoutOrder
+List.Parent = Scroll
+
+List:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+    Scroll.CanvasSize = UDim2.new(0, 0, 0, List.AbsoluteContentSize.Y + 12)
+end)
+
+-- ================================================
+--   TOGGLE ROW BUILDER
+-- ================================================
+
+local activeThreads = {}  -- jobKey -> coroutine thread token
+
+local function stopJob(jobKey)
+    if activeThreads[jobKey] then
+        activeThreads[jobKey] = false
+    end
+end
+
+local function stopAll()
+    for k in pairs(activeThreads) do
+        activeThreads[k] = false
+    end
+    setStatus("Idle — Select a job to begin", false)
+end
+
+local toggleButtons = {}
+
+local function makeJobRow(icon, label, jobKey, color, farmFn)
+    local Row = Instance.new("Frame")
+    Row.Size = UDim2.new(1, 0, 0, 44)
+    Row.BackgroundColor3 = Color3.fromRGB(18, 18, 28)
+    Row.BorderSizePixel = 0
+    Row.ZIndex = 2
+    Row.Parent = Scroll
+    Instance.new("UICorner", Row).CornerRadius = UDim.new(0, 8)
+
+    -- Left accent stripe
+    local Stripe = Instance.new("Frame")
+    Stripe.Size = UDim2.new(0, 3, 1, -12)
+    Stripe.Position = UDim2.new(0, 0, 0, 6)
+    Stripe.BackgroundColor3 = color
+    Stripe.BorderSizePixel = 0
+    Stripe.ZIndex = 3
+    Stripe.Parent = Row
+    Instance.new("UICorner", Stripe).CornerRadius = UDim.new(0, 2)
+
+    -- Icon
+    local Ico = Instance.new("TextLabel")
+    Ico.Size = UDim2.new(0, 28, 1, 0)
+    Ico.Position = UDim2.new(0, 10, 0, 0)
+    Ico.BackgroundTransparency = 1
+    Ico.Text = icon
+    Ico.TextSize = 16
+    Ico.Font = Enum.Font.GothamBold
+    Ico.ZIndex = 3
+    Ico.Parent = Row
+
+    -- Label
+    local Lbl = Instance.new("TextLabel")
+    Lbl.Size = UDim2.new(1, -90, 0, 18)
+    Lbl.Position = UDim2.new(0, 42, 0, 7)
+    Lbl.BackgroundTransparency = 1
+    Lbl.Text = label
+    Lbl.TextColor3 = Color3.fromRGB(220, 220, 240)
+    Lbl.TextSize = 12
+    Lbl.Font = Enum.Font.GothamSemibold
+    Lbl.TextXAlignment = Enum.TextXAlignment.Left
+    Lbl.ZIndex = 3
+    Lbl.Parent = Row
+
+    -- Sub status
+    local Sub = Instance.new("TextLabel")
+    Sub.Size = UDim2.new(1, -90, 0, 14)
+    Sub.Position = UDim2.new(0, 42, 0, 25)
+    Sub.BackgroundTransparency = 1
+    Sub.Text = "Off"
+    Sub.TextColor3 = Color3.fromRGB(90, 90, 110)
+    Sub.TextSize = 10
+    Sub.Font = Enum.Font.Gotham
+    Sub.TextXAlignment = Enum.TextXAlignment.Left
+    Sub.ZIndex = 3
+    Sub.Parent = Row
+
+    -- Toggle pill
+    local PillBg = Instance.new("TextButton")
+    PillBg.Size = UDim2.new(0, 44, 0, 22)
+    PillBg.Position = UDim2.new(1, -54, 0.5, -11)
+    PillBg.BackgroundColor3 = Color3.fromRGB(35, 35, 55)
+    PillBg.Text = ""
+    PillBg.BorderSizePixel = 0
+    PillBg.ZIndex = 3
+    PillBg.Parent = Row
+    Instance.new("UICorner", PillBg).CornerRadius = UDim.new(1, 0)
+
+    local Knob = Instance.new("Frame")
+    Knob.Size = UDim2.new(0, 16, 0, 16)
+    Knob.Position = UDim2.new(0, 3, 0.5, -8)
+    Knob.BackgroundColor3 = Color3.fromRGB(80, 80, 100)
+    Knob.BorderSizePixel = 0
+    Knob.ZIndex = 4
+    Knob.Parent = PillBg
+    Instance.new("UICorner", Knob).CornerRadius = UDim.new(1, 0)
+
+    local isOn = false
+
+    local function setToggle(on)
+        isOn = on
+        if on then
+            TweenService:Create(PillBg, TweenInfo.new(0.2), {BackgroundColor3 = color}):Play()
+            TweenService:Create(Knob,   TweenInfo.new(0.2), {Position = UDim2.new(1, -19, 0.5, -8), BackgroundColor3 = Color3.fromRGB(255,255,255)}):Play()
+            Sub.Text = "Running..."
+            Sub.TextColor3 = color
+        else
+            TweenService:Create(PillBg, TweenInfo.new(0.2), {BackgroundColor3 = Color3.fromRGB(35,35,55)}):Play()
+            TweenService:Create(Knob,   TweenInfo.new(0.2), {Position = UDim2.new(0, 3, 0.5, -8), BackgroundColor3 = Color3.fromRGB(80,80,100)}):Play()
+            Sub.Text = "Off"
+            Sub.TextColor3 = Color3.fromRGB(90,90,110)
+        end
+    end
+
+    toggleButtons[jobKey] = setToggle
+
+    PillBg.MouseButton1Click:Connect(function()
+        if isOn then
+            -- Turn off
+            stopJob(jobKey)
+            setToggle(false)
+            setStatus("Idle — Select a job to begin", false)
+        else
+            -- Stop any other running job
+            stopAll()
+            for k, fn in pairs(toggleButtons) do
+                if k ~= jobKey then fn(false) end
+            end
+            -- Turn on
+            setToggle(true)
+            setStatus("⚙ Starting " .. label, true)
+            -- Token
+            local token = {}
+            activeThreads[jobKey] = token
+            task.spawn(function()
+                -- Join job first
+                joinJob(jobKey, label, function(s) setStatus(s, true) end)
+                -- Run farm
+                farmFn(token, function(s)
+                    Sub.Text = s
+                    setStatus(label .. " — " .. s, true)
+                end)
+                -- Farm ended
+                if activeThreads[jobKey] == token then
+                    activeThreads[jobKey] = false
+                    setToggle(false)
+                    setStatus("Idle — Select a job to begin", false)
+                end
+            end)
+        end
+    end)
+
+    return Row
+end
+
+-- Section header
+local function makeHeader(txt)
+    local f = Instance.new("Frame")
+    f.Size = UDim2.new(1, 0, 0, 18)
+    f.BackgroundTransparency = 1
+    f.ZIndex = 2
+    f.Parent = Scroll
+
+    local l = Instance.new("TextLabel")
+    l.Size = UDim2.new(1, 0, 1, 0)
+    l.BackgroundTransparency = 1
+    l.Text = txt:upper()
+    l.TextColor3 = Color3.fromRGB(60, 70, 110)
+    l.TextSize = 9
+    l.Font = Enum.Font.GothamBold
+    l.TextXAlignment = Enum.TextXAlignment.Left
+    l.LetterSpacing = 3
+    l.ZIndex = 3
+    l.Parent = f
+end
+
+-- ================================================
+--   FARM FUNCTIONS
+--   Each returns when token is invalidated
+--   statusFn(string) updates the row sub-label
+-- ================================================
+
+-- Shared: approach a part smoothly without teleporting
+local function approachAndInteract(part, token, arrivedCb)
+    if not part then return end
+    local pos = getPos(part)
+    if not pos then return end
+    local hrp = getHRP()
+    if not hrp then return end
+    -- Only TP if very far, otherwise walk
+    local dist = (hrp.Position - pos).Magnitude
+    if dist > 40 then
+        safeTp(CFrame.new(pos + Vector3.new(0, 0, 3.5)), 0.5)
+    else
+        walkTo(pos, 6)
+    end
+    if arrivedCb then arrivedCb() end
+    interact(part)
+    task.wait(0.4)
+end
+
+-- ─── PIZZA DELIVERY (5-star optimized) ──────────────────
+local function farmPizza(token, statusFn)
+    -- Known pizza delivery steps: pick up order → deliver fast → return fast
+    -- Speed boost during delivery for 5-star rating (time-based)
+    local hum = getHum()
+    if hum then hum.WalkSpeed = 28 end  -- faster walk for better rating
+
+    while token and activeThreads["PizzaDelivery"] == token do
+        statusFn("Finding order counter")
+        local counter = findPart({"pizzaorder","orderstation","pickupstation","counter","pizzacounter","orderpickup"})
+        if counter then
+            approachAndInteract(counter, token, function() statusFn("Picking up order") end)
+            task.wait(0.8)
+        end
+
+        statusFn("Delivering — 5★ rush!")
+        local deliver = findPart({"deliveryspot","deliverpoint","deliver","dropoff","customer","house","pizzadrop"})
+        if deliver then
+            -- Sprint to delivery
+            local h = getHum()
+            if h then h.WalkSpeed = 36 end
+            approachAndInteract(deliver, token, function() statusFn("Dropping off order") end)
+            task.wait(0.5)
+            if h then h.WalkSpeed = 28 end
+        end
+
+        -- Return to shop fast for next order (keeps queue and rating high)
+        statusFn("Returning to shop")
+        local shop = findPart({"pizzashop","pizzaplace","pizzeria","shop","restaurant"})
+        if shop then
+            approachAndInteract(shop, token, nil)
+        end
+
+        -- Collect tip / interact with cash register
+        local register = findPart({"register","cashier","tip","collect","pay"})
+        if register then
+            approachAndInteract(register, token, function() statusFn("Collecting payment") end)
+        end
+
+        task.wait(1)
+    end
+    local h = getHum(); if h then h.WalkSpeed = 16 end
+end
+
+-- ─── POLICE ─────────────────────────────────────────────
+local function farmPolice(token, statusFn)
+    while token and activeThreads["Police"] == token do
+        statusFn("Checking dispatch")
+        local dispatch = findPart({"dispatch","police","station","clk","clock","duty"})
+        if dispatch then
+            approachAndInteract(dispatch, token, function() statusFn("Clocking in") end)
+            task.wait(1)
+        end
+
+        statusFn("Patrolling for criminals")
+        local target = findPart({"arrest","handcuff","criminal","wanted","suspect","rob"})
+        if target then
+            approachAndInteract(target, token, function() statusFn("Arresting suspect") end)
+            task.wait(1.5)
+        else
+            -- Patrol to common crime spots
+            task.wait(3)
+        end
+
+        local evidence = findPart({"evidence","report","filing","station","desk"})
+        if evidence then
+            approachAndInteract(evidence, token, function() statusFn("Filing report") end)
+            task.wait(1)
+        end
+        task.wait(1)
+    end
+end
+
+-- ─── MINER ──────────────────────────────────────────────
+local function farmMiner(token, statusFn)
+    while token and activeThreads["Miner"] == token do
+        statusFn("Finding ore")
+        local ore = findPart({"rock","ore","coal","gem","stone","mineral","deposit"})
+        if ore then
+            approachAndInteract(ore, token, function() statusFn("Mining ore") end)
+            task.wait(1.5)
+        end
+
+        statusFn("Selling ore")
+        local sell = findPart({"sell","deposit","cart","chest","sellpoint","minestore"})
+        if sell then
+            approachAndInteract(sell, token, function() statusFn("Depositing ore") end)
+            task.wait(1)
+        end
+        task.wait(0.8)
+    end
+end
+
+-- ─── FISHERMAN ──────────────────────────────────────────
+local function farmFisher(token, statusFn)
+    while token and activeThreads["Fisher"] == token do
+        statusFn("Going to fishing spot")
+        local dock = findPart({"fishspot","dock","pier","fishingrod","fish","cast","water"})
+        if dock then
+            local pos = getPos(dock)
+            if pos then
+                -- Walk to dock edge, don't TP into water
+                local hrp = getHRP()
+                if hrp then
+                    local dist = (hrp.Position - pos).Magnitude
+                    if dist > 30 then
+                        safeTp(CFrame.new(pos + Vector3.new(0, 0, 4)), 0.5)
+                    end
+                end
+                interact(dock)
+                statusFn("Fishing... (waiting for catch)")
+                task.wait(4)   -- fishing animation time
+                interact(dock) -- reel in
+                task.wait(0.5)
+            end
+        end
+
+        statusFn("Selling fish")
+        local sell = findPart({"fishmarket","fishsell","sell","market","store"})
+        if sell then
+            approachAndInteract(sell, token, function() statusFn("Selling catch") end)
+            task.wait(1)
+        end
+        task.wait(0.5)
+    end
+end
+
+-- ─── DOCTOR ─────────────────────────────────────────────
+local function farmDoctor(token, statusFn)
+    while token and activeThreads["Doctor"] == token do
+        statusFn("Checking in at hospital")
+        local desk = findPart({"desk","checkin","reception","nurse","station","hospital"})
+        if desk then
+            approachAndInteract(desk, token, function() statusFn("Clocked in") end)
+            task.wait(1)
+        end
+
+        statusFn("Finding patient")
+        local patient = findPart({"patient","bed","treat","heal","sick","examine"})
+        if patient then
+            approachAndInteract(patient, token, function() statusFn("Treating patient") end)
+            task.wait(2.5)
+        end
+
+        local med = findPart({"medicine","prescription","pharmacy","drug","supply"})
+        if med then
+            approachAndInteract(med, token, function() statusFn("Getting medicine") end)
+            task.wait(1)
+        end
+        task.wait(1)
+    end
+end
+
+-- ─── FIREFIGHTER ────────────────────────────────────────
+local function farmFirefighter(token, statusFn)
+    while token and activeThreads["Firefighter"] == token do
+        statusFn("Checking for fires")
+        local fire = findPart({"fire","flame","burning","blaze","smoke","alarm"})
+        if fire then
+            approachAndInteract(fire, token, function() statusFn("Extinguishing fire") end)
+            task.wait(3)
+        else
+            statusFn("No active fires — waiting")
+            task.wait(4)
+        end
+
+        statusFn("Returning to station")
+        local station = findPart({"firestation","firetruck","truck","hose","firehouse"})
+        if station then
+            approachAndInteract(station, token, function() statusFn("Restocking equipment") end)
+            task.wait(1)
+        end
+        task.wait(1)
+    end
+end
+
+-- ─── MECHANIC ───────────────────────────────────────────
+local function farmMechanic(token, statusFn)
+    while token and activeThreads["Mechanic"] == token do
+        statusFn("Finding vehicle to repair")
+        local car = findPart({"repair","broken","vehicle","car","wrench","mechanic","fix"})
+        if car then
+            approachAndInteract(car, token, function() statusFn("Repairing vehicle") end)
+            task.wait(2.5)
+        end
+
+        statusFn("Collecting payment")
+        local pay = findPart({"pay","register","collect","cashier","payment"})
+        if pay then
+            approachAndInteract(pay, token, function() statusFn("Payment received") end)
+            task.wait(1)
+        end
+        task.wait(1)
+    end
+end
+
+-- ─── CASHIER ────────────────────────────────────────────
+local function farmCashier(token, statusFn)
+    while token and activeThreads["Cashier"] == token do
+        statusFn("Going to register")
+        local reg = findPart({"register","cashier","checkout","till","scan","counter"})
+        if reg then
+            approachAndInteract(reg, token, function() statusFn("At register") end)
+            task.wait(0.5)
+        end
+
+        statusFn("Scanning items")
+        local item = findPart({"item","scan","product","barcode","grocerie","good"})
+        if item then
+            approachAndInteract(item, token, function() statusFn("Item scanned") end)
+            task.wait(0.8)
+        end
+
+        statusFn("Processing sale")
+        task.wait(1)
+
+        local done = findPart({"complete","done","finish","sale","receipt"})
+        if done then
+            approachAndInteract(done, token, function() statusFn("Sale complete") end)
+            task.wait(0.5)
+        end
+        task.wait(0.8)
+    end
+end
+
+-- ─── BANKER ─────────────────────────────────────────────
+local function farmBanker(token, statusFn)
+    while token and activeThreads["Banker"] == token do
+        statusFn("Going to teller window")
+        local teller = findPart({"teller","banker","bank","vault","window","counter"})
+        if teller then
+            approachAndInteract(teller, token, function() statusFn("At teller window") end)
+            task.wait(1)
+        end
+
+        statusFn("Processing transaction")
+        local trans = findPart({"transaction","deposit","withdraw","transfer","safe"})
+        if trans then
+            approachAndInteract(trans, token, function() statusFn("Transaction done") end)
+            task.wait(2)
+        end
+        task.wait(1)
+    end
+end
+
+-- ─── CRIMINAL ───────────────────────────────────────────
+local function farmCriminal(token, statusFn)
+    while token and activeThreads["Criminal"] == token do
+        statusFn("Scouting robbery target")
+        local target = findPart({"rob","steal","vault","loot","heist","break","burglar"})
+        if target then
+            approachAndInteract(target, token, function() statusFn("Robbing...") end)
+            task.wait(3)
+        end
+
+        statusFn("Escaping to hideout")
+        local hide = findPart({"hideout","escape","safe","launder","fence","criminal"})
+        if hide then
+            approachAndInteract(hide, token, function() statusFn("Laundering money") end)
+            task.wait(2)
+        end
+        task.wait(1)
+    end
+end
+
+-- ================================================
+--   BUILD UI ROWS
+-- ================================================
+
+makeHeader("  Delivery")
+makeJobRow("🍕","Pizza Delivery","PizzaDelivery", Color3.fromRGB(255,130,30),  farmPizza)
+
+makeHeader("  Emergency")
+makeJobRow("👮","Police Officer","Police",      Color3.fromRGB(60,100,255),  farmPolice)
+makeJobRow("🚒","Firefighter",   "Firefighter", Color3.fromRGB(220,70,30),   farmFirefighter)
+makeJobRow("🏥","Doctor / Nurse","Doctor",      Color3.fromRGB(220,50,80),   farmDoctor)
+
+makeHeader("  Labour")
+makeJobRow("⛏️","Miner",         "Miner",       Color3.fromRGB(160,110,40),  farmMiner)
+makeJobRow("🎣","Fisherman",     "Fisher",      Color3.fromRGB(40,150,210),  farmFisher)
+makeJobRow("🔧","Mechanic",      "Mechanic",    Color3.fromRGB(100,100,115), farmMechanic)
+
+makeHeader("  Commerce")
+makeJobRow("🛒","Cashier",       "Cashier",     Color3.fromRGB(40,180,90),   farmCashier)
+makeJobRow("🏦","Banker",        "Banker",      Color3.fromRGB(200,165,30),  farmBanker)
+
+makeHeader("  Illegal")
+makeJobRow("🦹","Criminal",      "Criminal",    Color3.fromRGB(180,30,30),   farmCriminal)
+
+makeHeader("  Controls")
+local StopRow = Instance.new("Frame")
+StopRow.Size = UDim2.new(1, 0, 0, 36)
+StopRow.BackgroundColor3 = Color3.fromRGB(30, 15, 15)
+StopRow.BorderSizePixel = 0
+StopRow.ZIndex = 2
+StopRow.Parent = Scroll
+Instance.new("UICorner", StopRow).CornerRadius = UDim.new(0, 8)
+
+local StopBtn = Instance.new("TextButton")
+StopBtn.Size = UDim2.new(1, -16, 0, 24)
+StopBtn.Position = UDim2.new(0, 8, 0.5, -12)
+StopBtn.BackgroundColor3 = Color3.fromRGB(180, 30, 30)
+StopBtn.Text = "⏹  Stop All Farming"
+StopBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+StopBtn.TextSize = 12
+StopBtn.Font = Enum.Font.GothamBold
+StopBtn.BorderSizePixel = 0
+StopBtn.ZIndex = 3
+StopBtn.Parent = StopRow
+Instance.new("UICorner", StopBtn).CornerRadius = UDim.new(0, 6)
+
+StopBtn.MouseButton1Click:Connect(function()
+    stopAll()
+    for _, fn in pairs(toggleButtons) do fn(false) end
+end)
+
+local HintRow = Instance.new("TextLabel")
+HintRow.Size = UDim2.new(1, 0, 0, 28)
+HintRow.BackgroundTransparency = 1
+HintRow.Text = "RightAlt → toggle GUI visibility"
+HintRow.TextColor3 = Color3.fromRGB(55, 55, 80)
+HintRow.TextSize = 10
+HintRow.Font = Enum.Font.Gotham
+HintRow.ZIndex = 2
+HintRow.Parent = Scroll
+
+-- ================================================
+--   KEYBIND
+-- ================================================
+
+UIS.InputBegan:Connect(function(input, gpe)
+    if gpe then return end
+    if input.KeyCode == Enum.KeyCode.RightAlt then
+        Main.Visible = not Main.Visible
+        Shadow.Visible = Main.Visible
+    end
+end)
+
+print("[RC AutoFarm v2] Loaded — Toggle jobs from the GUI")
